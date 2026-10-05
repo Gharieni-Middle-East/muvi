@@ -7,6 +7,7 @@ modes stay unchanged; shares the worker's LiveAudioEngine instance.
 from __future__ import annotations
 
 import os
+import time
 import wave
 from typing import Any
 
@@ -115,7 +116,7 @@ def start_demo_audio(
     highpass_hz: float = 30.0,
     cutoff_hz: float = 200.0,
     path: str | None = None,
-    vibration_mode: str = "zones",
+    vibration_mode: str = "haptics",
     vibration_output_index: int | None = None,
     audio_output_index: int | None = None,
     roles_flipped: bool = False,
@@ -140,6 +141,14 @@ def start_demo_audio(
 
     from live_audio import _pick_output_devices
 
+    # Release any previous stream BEFORE probing — same lock issue as live start.
+    if _engine is not None and _engine.is_active:
+        _engine.stop()
+    _gigaport.stop()
+    _gigaport.release_output_device()
+    # Let Windows finish releasing the device before PortAudio probes again.
+    time.sleep(0.2)
+
     output_dev, audio_dev, layout, _pick_meta = _pick_output_devices(
         vibration_index=vibration_output_index,
         audio_index=audio_output_index,
@@ -157,8 +166,6 @@ def start_demo_audio(
             f"{audio_dev['hostapi']}, #{audio_output_index})"
         )
 
-    _gigaport.stop()
-    _gigaport.release_output_device()
     _engine.set_output_layout(layout)
     _engine.set_vibration_mode(vibration_mode)  # type: ignore[arg-type]
     _engine.set_output_channel_plan(

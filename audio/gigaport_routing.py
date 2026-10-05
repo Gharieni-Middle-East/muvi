@@ -29,9 +29,10 @@ MIN_DUAL_CHANNELS = DUAL_GIGAPORT_CHANNELS
 
 OutputLayout = Literal["single", "dual_asio4all", "dual_native", "vibration_only"]
 SpeakerRoute = Literal["headphones", "secondary"]
-# "zones"  = one body zone per stereo pair (ch1-2 head, 3-4 upper, 5-6 mid, 7-8 legs).
-# "stereo" = left channel to all left shakers (odd ch), right to all right shakers (even ch).
-VibrationMode = Literal["zones", "stereo"]
+# "zones"   = one body zone per stereo pair (ch1-2 head, 3-4 upper, 5-6 mid, 7-8 legs).
+# "stereo"  = left channel to all left shakers (odd ch), right to all right shakers (even ch).
+# "haptics" = Quake HapticDSP → 8ch direct (bypasses build_vibration_only_block).
+VibrationMode = Literal["zones", "stereo", "haptics"]
 
 VIBRATION_ONLY_CHANNELS = 8
 

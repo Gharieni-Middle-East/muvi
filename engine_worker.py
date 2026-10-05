@@ -80,7 +80,7 @@ def main() -> int:
                     vibration_overlay=False,
                     prefer_bluetooth=bool(msg.get("prefer_bluetooth", False)),
                     speaker_route=str(msg.get("speaker_route", "headphones")),
-                    vibration_mode=str(msg.get("vibration_mode", "zones")),
+                    vibration_mode=str(msg.get("vibration_mode", "haptics")),
                     vibration_output_index=msg.get("vibration_output_index"),
                     audio_output_index=msg.get("audio_output_index"),
                     roles_flipped=bool(msg.get("roles_flipped", False)),
@@ -109,7 +109,7 @@ def main() -> int:
                     head=zi["head"],
                     cutoff_hz=float(msg.get("cutoff_hz", msg.get("highpass_hz", 200.0))),
                     path=msg.get("path"),
-                    vibration_mode=str(msg.get("vibration_mode", "zones")),
+                    vibration_mode=str(msg.get("vibration_mode", "haptics")),
                     vibration_output_index=msg.get("vibration_output_index"),
                     audio_output_index=msg.get("audio_output_index"),
                     roles_flipped=bool(msg.get("roles_flipped", False)),
@@ -173,8 +173,8 @@ def main() -> int:
                     _reply({"ok": True, "speaker_route": route})
 
             elif cmd == "set_vibration_mode":
-                vmode = str(msg.get("mode", "zones"))
-                if vmode not in ("zones", "stereo"):
+                vmode = str(msg.get("mode", "haptics"))
+                if vmode not in ("zones", "stereo", "haptics"):
                     _reply({"ok": False, "error": f"bad vibration mode: {vmode}"})
                 else:
                     set_vibration_mode(vmode)  # type: ignore[arg-type]

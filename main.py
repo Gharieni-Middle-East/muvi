@@ -87,7 +87,7 @@ class Api:
                 "message": "Connect AUX or Bluetooth to start.",
             },
             "speaker_route": "headphones",  # 'headphones' | 'secondary' (dual Gigaport)
-            "vibration_mode": "zones",  # 'zones' (per-row) | 'stereo' (L/R shakers)
+            "vibration_mode": "haptics",  # 'haptics' | 'zones' | 'stereo'
             "output_layout": None,  # 'single' | 'dual_native'
             "audio_output_channels": 0,  # channels on the audio (sound) device
             "vibration_output_index": None,
@@ -123,6 +123,7 @@ class Api:
             "artwork": "assets/artwork.svg",
         }
         self._live_started_at: float | None = None
+        self._bt_autostart_at: float = 0.0
         self._last_paired_refresh = 0.0
         self._paired_refresh_busy = False
         self._battery = BatteryManager()
@@ -269,17 +270,32 @@ class Api:
         threading.Thread(target=_work, daemon=True, name="bt-paired-refresh").start()
 
     def _refresh_bluetooth_link(self) -> None:
-        """Clear stale 'connected' when phone drops or Windows Bluetooth is off."""
+        """Clear stale 'connected' when phone drops or Windows Bluetooth is off.
+
+        While BT stays connected, keep Live running (no Play/Stop needed).
+        """
         with self._lock:
             connected_id = self.state["bluetooth"].get("connected_id")
             connecting = self.state["bluetooth"].get("connecting_id")
             live_mode = self.state.get("live_mode")
             playing = self.state.get("playing")
+            play_busy = self.state.get("play_busy")
         if not connected_id or connecting:
             return
 
         status = self._bt.get_status(connected_id)
         if status.get("connected"):
+            # BT session owns Live — auto-start / recover if not already on cable.
+            needs_live = (not playing) or (live_mode == "demo")
+            if needs_live and not play_busy:
+                now = time.monotonic()
+                if now - self._bt_autostart_at >= 2.0:
+                    self._bt_autostart_at = now
+                    try:
+                        print("[app] Bluetooth connected — starting Live")
+                        self.start_live()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[app] BT auto-start Live failed: {exc}")
             return
 
         reason = status.get("reason") or "disconnected"
@@ -452,7 +468,7 @@ class Api:
                 cutoff_hz=self.state["cutoff_hz"],
                 prefer_bluetooth=bool(self.state["bluetooth"].get("connected_id")),
                 speaker_route=self.state.get("speaker_route", "headphones"),
-                vibration_mode=self.state.get("vibration_mode", "zones"),
+                vibration_mode=self.state.get("vibration_mode", "haptics"),
                 vibration_output_index=self.state.get("vibration_output_index"),
                 audio_output_index=self.state.get("audio_output_index"),
                 roles_flipped=bool(self.state.get("gigaport_roles_flipped")),
@@ -511,12 +527,19 @@ class Api:
         """Now Playing Play = Start Live / Stop Live.
 
         If Demo is playing, Play starts Live (replaces demo) instead of only stopping.
+        While Bluetooth is connected, Live is owned by the BT session — Play/Stop
+        does not stop it (disconnect does).
         """
         with self._lock:
             if self.state["play_busy"]:
                 return self._snapshot()
             playing = self.state["playing"]
             is_demo = self.state.get("live_mode") == "demo"
+            bt_connected = bool(self.state["bluetooth"].get("connected_id"))
+        if bt_connected:
+            if playing and not is_demo:
+                return self._snapshot()
+            return self.start_live()
         if playing and is_demo:
             return self.start_live()
         if playing:
@@ -551,7 +574,7 @@ class Api:
                 volume=self.state["volume"],
                 vibration=self.state["vibration"],
                 cutoff_hz=self.state["cutoff_hz"],
-                vibration_mode=self.state.get("vibration_mode", "zones"),
+                vibration_mode=self.state.get("vibration_mode", "haptics"),
                 vibration_output_index=self.state.get("vibration_output_index"),
                 audio_output_index=self.state.get("audio_output_index"),
                 roles_flipped=bool(self.state.get("gigaport_roles_flipped")),
@@ -733,10 +756,10 @@ class Api:
             return self._snapshot()
 
     def set_vibration_mode(self, mode: str) -> dict[str, Any]:
-        """Switch vibration routing between per-row 'zones' and 'stereo' (L/R shakers)."""
+        """Switch vibration: 'zones', 'stereo' (L/R), or 'haptics' (Quake DSP)."""
         mode = str(mode).strip().lower()
-        if mode not in ("zones", "stereo"):
-            mode = "zones"
+        if mode not in ("zones", "stereo", "haptics"):
+            mode = "haptics"
         with self._lock:
             self.state["vibration_mode"] = mode
         self._engine.set_vibration_mode(mode)
@@ -1018,6 +1041,15 @@ class Api:
                             d["audio_ready"] = True
                             d["profile"] = "Connected · Audio ready"
                 self.state["bluetooth"]["error"] = error
+
+            # BT session owns Live — start immediately; no Play press needed.
+            if connected:
+                try:
+                    time.sleep(0.35)  # let CABLE / APC settle briefly
+                    print("[app] Bluetooth connected — auto-starting Live")
+                    self.start_live()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[app] BT connect auto-start Live failed: {exc}")
 
         threading.Thread(target=_work, daemon=True, name="bt-connect").start()
         return snap

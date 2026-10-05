@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from typing import Any
 
 import sounddevice as sd
@@ -24,7 +25,10 @@ elif sys.platform.startswith("linux"):
     _PREFERRED_HOSTAPIS = ("alsa", "jack", "pulse")
     _BLOCKED_HOSTAPIS = ()
 else:  # win32 and anything else
-    _PREFERRED_HOSTAPIS = ("wdm-ks", "wasapi")
+    # WASAPI first: shared-mode opens reliably and actually drives the Gigaport.
+    # WDM-KS is a fallback only — it often fails to open (PaErrorCode -9996) or
+    # opens without producing a physical signal on this hardware.
+    _PREFERRED_HOSTAPIS = ("wasapi", "wdm-ks")
     _BLOCKED_HOSTAPIS = ("asio", "mme", "directsound")
 
 
@@ -117,34 +121,112 @@ def is_audio_interface_name(name: str) -> bool:
     )
 
 
-def wasapi_output_extra(device_index: int) -> Any | None:
+def wasapi_output_extra(
+    device_index: int,
+    *,
+    exclusive: bool = False,
+) -> Any | None:
     if sys.platform != "win32":
         return None
     api = _hostapi_name(int(sd.query_devices(device_index)["hostapi"])).lower()
     if "wasapi" not in api:
         return None
     try:
-        return sd.WasapiSettings(exclusive=False, auto_convert=True)
+        # Shared (exclusive=False) is the default — plays through the Windows mixer
+        # and is what actually drives Gigaport transducers. Exclusive is only used
+        # as a probe fallback when shared rejects multi-channel.
+        return sd.WasapiSettings(exclusive=bool(exclusive), auto_convert=not exclusive)
     except Exception:
         return None
 
 
-def probe_output_channels(device_index: int, sample_rate: int, candidates: tuple[int, ...]) -> int | None:
-    extra = wasapi_output_extra(device_index)
+def refresh_portaudio() -> None:
+    """Re-init PortAudio so USB endpoints reappear after unplug/replug or a stuck exclusive lock."""
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception:
+        pass
+
+
+def probe_output_channels(
+    device_index: int,
+    sample_rate: int,
+    candidates: tuple[int, ...],
+) -> int | None:
+    """Return the highest channel count that PortAudio will accept for this device.
+
+    Tries several sample rates — Gigaport endpoints sometimes reject 44100 on
+    WDM-KS while 48000 (or the device default) succeeds.
+    On Windows WASAPI, also tries exclusive mode if shared rejects multi-channel.
+    """
+    rates: list[int] = []
+    for rate in (int(sample_rate), 44100, 48000):
+        if rate > 0 and rate not in rates:
+            rates.append(rate)
+    try:
+        default_sr = int(sd.query_devices(device_index).get("default_samplerate") or 0)
+        if default_sr > 0 and default_sr not in rates:
+            rates.append(default_sr)
+    except Exception:
+        pass
+
+    hostapi = ""
+    try:
+        hostapi = _hostapi_name(int(sd.query_devices(device_index)["hostapi"])).lower()
+    except Exception:
+        pass
+    is_wdm = "wdm" in hostapi
+
+    extras: list[Any | None] = [wasapi_output_extra(device_index, exclusive=False)]
+    # Exclusive only as second pass — some Multi 8 endpoints reject shared 8ch.
+    excl = wasapi_output_extra(device_index, exclusive=True)
+    if excl is not None:
+        extras.append(excl)
+
     for ch in candidates:
-        try:
-            kwargs: dict[str, Any] = {
-                "device": device_index,
-                "channels": ch,
-                "samplerate": sample_rate,
-                "dtype": "float32",
-            }
-            if extra is not None:
-                kwargs["extra_settings"] = extra
-            sd.check_output_settings(**kwargs)
-            return ch
-        except Exception:
+        for rate in rates:
+            for extra in extras:
+                try:
+                    kwargs: dict[str, Any] = {
+                        "device": device_index,
+                        "channels": ch,
+                        "samplerate": rate,
+                        "dtype": "float32",
+                    }
+                    if extra is not None:
+                        kwargs["extra_settings"] = extra
+                    sd.check_output_settings(**kwargs)
+                    return ch
+                except Exception:
+                    continue
+
+    # Last resort: briefly open a real stream. Core Audio sometimes under-reports
+    # max_output_channels (shows 2) while 8ch open still works.
+    # Skip on Windows WDM-KS — open/close races leave the device busy and the
+    # next real open fails (forces unplug/replug). WASAPI check_output_settings
+    # above is the reliable path for Gigaport on Windows.
+    if sys.platform == "win32" and is_wdm:
+        return None
+
+    for ch in candidates:
+        if ch < 4:
             continue
+        for rate in rates:
+            try:
+                stream = sd.OutputStream(
+                    device=device_index,
+                    channels=ch,
+                    samplerate=rate,
+                    dtype="float32",
+                    blocksize=256,
+                )
+                stream.start()
+                stream.stop()
+                stream.close()
+                return ch
+            except Exception:
+                continue
     return None
 
 
@@ -206,16 +288,9 @@ def gigaport_unit_key(name: str) -> str:
 
     Windows enumerates a second identical device as '2- <name>' (often inside
     parentheses: 'Speakers (2- GIGAPORT eX)'), a third as '3- …', etc.
-    Endpoints without that numeric prefix belong to the first unit — until we
-    split colliding Speakers / oversized Line Out groups in `_group_units`.
+    Only that leading instance prefix counts — never digits inside CH5&6 / Multi 8.
     """
-    m = re.search(r"(?:^|[\(\[])\s*(\d+)-\s", name)
-    if m:
-        return m.group(1)
-    m = re.search(r"(\d+)-\s", name)
-    if m:
-        return m.group(1)
-    m = re.search(r"\(#\s*(\d+)\)", name)
+    m = re.search(r"(?:^|[\(\[])\s*(\d+)\s*-\s+", name)
     if m:
         return m.group(1)
     return "1"
@@ -225,6 +300,11 @@ def _is_wasapi_speakers(dev: dict[str, Any]) -> bool:
     api = str(dev.get("hostapi", "")).lower()
     name = str(dev.get("name", "")).lower()
     return "wasapi" in api and "speakers" in name
+
+
+def _main_wasapi_speakers(dev: dict[str, Any]) -> bool:
+    """Primary WASAPI Speakers render endpoint (not a CH1&2 stereo sub-out)."""
+    return _is_wasapi_speakers(dev) and not _is_ch_pair_endpoint(dev)
 
 
 def _is_ch_pair_endpoint(dev: dict[str, Any]) -> bool:
@@ -285,77 +365,87 @@ def _unit_key(dev: dict[str, Any]) -> str:
 def _group_units(gigaports: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Map physical-unit key -> its endpoints (kept in best-first sort order).
 
-    On Windows, two identical Gigaports often share the same PortAudio name
-    with no '2-' prefix. macOS never hits this path (keyed by device index).
-    We therefore:
-      1. Treat each WASAPI 'Speakers (…Gigaport…)' as its own physical unit
-      2. Split a single name-bucket that holds >4 WDM-KS CH-pair endpoints
+    On Windows one physical Gigaport exposes WASAPI Speakers + WDM-KS Multi +
+    CH-pair Line Outs. WASAPI names often get a '5- ' (etc.) instance prefix
+    while WDM-KS Multi stays unprefixed — those MUST stay one unit. Splitting
+    them made us open silent WDM-KS while the live WASAPI Speakers sat unused.
+
+    Two physical boxes: two multichannel WASAPI Speakers with different
+    instance prefixes, or >4 unique CH-pair Line Outs.
     """
     if sys.platform != "win32":
         return {str(d["index"]): [d] for d in gigaports}
 
-    # A physical Gigaport is one *multichannel* WASAPI render endpoint. The ESI
-    # driver also exposes each stereo jack as its own 2-ch "Speakers (…Out 1/2)"
-    # endpoint; those are sub-outs of the SAME unit, not separate Gigaports, so
-    # they must not each count as a physical unit (that made one Gigaport look
-    # like two → false dual vibration+audio). Only >2-ch Speakers are real units.
-    speakers = [
-        d
-        for d in gigaports
-        if d.get("is_gigaport")
-        and _multichannel_wasapi_speakers(d)
-    ]
-    if len(speakers) >= 2:
-        units: dict[str, list[dict[str, Any]]] = {}
-        speaker_by_key: dict[str, dict[str, Any]] = {}
-        used: set[str] = set()
-        for sp in sorted(speakers, key=lambda d: int(d["index"])):
-            base = gigaport_unit_key(sp["name"])
-            key = base if base not in used else f"{base}:{sp['index']}"
-            used.add(key)
-            units[key] = [sp]
-            speaker_by_key[key] = sp
+    by_base: dict[str, list[dict[str, Any]]] = {}
+    for d in gigaports:
+        by_base.setdefault(gigaport_unit_key(d["name"]), []).append(d)
 
-        for d in gigaports:
-            if any(int(d["index"]) == int(sp["index"]) for sp in speakers):
+    speaker_bases = [
+        base
+        for base, endpoints in by_base.items()
+        if any(_main_wasapi_speakers(d) for d in endpoints)
+    ]
+
+    if len(speaker_bases) >= 2:
+        # Real dual Gigaport — only Speakers bases are units. Fold orphan
+        # WDM-KS/MME buckets (different prefix, same USB box) onto the nearest
+        # Speakers unit so we never open silent WDM-KS as "the other Gigaport".
+        units: dict[str, list[dict[str, Any]]] = {base: [] for base in speaker_bases}
+        speaker_rep: dict[str, dict[str, Any]] = {}
+        for base in speaker_bases:
+            for d in by_base.get(base, []):
+                if _main_wasapi_speakers(d):
+                    speaker_rep[base] = d
+                    break
+            units[base].extend(by_base.get(base, []))
+        for base, endpoints in by_base.items():
+            if base in units:
                 continue
-            base = gigaport_unit_key(d["name"])
-            candidates = [k for k in units if k == base or k.startswith(f"{base}:")]
-            if not candidates:
-                key = base if base not in units else f"{base}:{d['index']}"
-                units.setdefault(key, []).append(d)
-                continue
-            if len(candidates) == 1:
-                units[candidates[0]].append(d)
-                continue
-            best = min(
-                candidates,
-                key=lambda k: abs(int(speaker_by_key[k]["index"]) - int(d["index"])),
-            )
-            units[best].append(d)
+            for d in endpoints:
+                if base == "1" and speaker_rep:
+                    # Unprefixed WDM/MME almost always belongs to the first
+                    # physical box (lowest Speakers index), not a '2-' unit.
+                    best = min(
+                        speaker_bases,
+                        key=lambda k: int(speaker_rep.get(k, {"index": 10**9})["index"]),
+                    )
+                else:
+                    best = min(
+                        speaker_bases,
+                        key=lambda k: abs(
+                            int(speaker_rep.get(k, {"index": 0})["index"]) - int(d["index"])
+                        ),
+                    )
+                units[best].append(d)
         return units
 
-    # Prefix group, then split buckets that clearly hold two physical units.
-    units = {}
-    for d in gigaports:
-        units.setdefault(gigaport_unit_key(d["name"]), []).append(d)
-    return _split_merged_windows_units(units)
+    if len(speaker_bases) == 1:
+        # One WASAPI Speakers = one physical box. Fold WDM-KS / MME / CH-pairs
+        # that got a different prefix into that same unit.
+        main = speaker_bases[0]
+        merged: list[dict[str, Any]] = []
+        for endpoints in by_base.values():
+            merged.extend(endpoints)
+        return _split_merged_windows_units({main: merged})
+
+    # No WASAPI Speakers yet — still one box if ≤4 CH-pair slots total.
+    all_eps = [d for endpoints in by_base.values() for d in endpoints]
+    if len(_unique_ch_pairs(all_eps)) <= 4:
+        return _split_merged_windows_units({"1": all_eps})
+
+    return _split_merged_windows_units(dict(by_base))
 
 
 def _split_merged_windows_units(
     units: dict[str, list[dict[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Split a name-key bucket that swallowed a second Gigaport (no '2-' prefix)."""
+    """Split a name-key bucket that swallowed a second Gigaport (no '2-' prefix).
+
+    Speakers + Speakers Multi on the same prefix are ONE physical box — do not
+    split them. Only CH-pair Line Out counts >4 indicate two merged boxes.
+    """
     out: dict[str, list[dict[str, Any]]] = {}
     for key, endpoints in units.items():
-        speakers = [d for d in endpoints if _multichannel_wasapi_speakers(d)]
-        if len(speakers) >= 2:
-            # Should be rare here (handled above); split Speakers-first anyway.
-            for i, sp in enumerate(sorted(speakers, key=lambda d: int(d["index"]))):
-                nk = key if i == 0 else f"{key}:{sp['index']}"
-                out[nk] = [sp]
-            continue
-
         pairs = _unique_ch_pairs(endpoints)
         # One Gigaport has 4 stereo Line Out pairs; >4 unique slots ⇒ merged units.
         if len(pairs) > 4:
@@ -398,6 +488,30 @@ def _device_label(dev: dict[str, Any]) -> str:
     )
 
 
+def _vibration_open_error(
+    preferred: dict[str, Any],
+    tried: list[dict[str, Any]],
+) -> str:
+    labels = ", ".join(_device_label(d) for d in tried[:6]) or _device_label(preferred)
+    mac_hint = ""
+    if sys.platform == "darwin":
+        mac_hint = (
+            "\n\nOn Mac, Core Audio often lists Gigaport as 2ch only. "
+            "Open Audio MIDI Setup → GIGAPORT eX → set 8 output channels "
+            "(or make an Aggregate Device). Full 8-shaker output is on the Windows tablet."
+        )
+    return (
+        f"Cannot open vibration output on {_device_label(preferred)}\n\n"
+        "PortAudio could not open any Gigaport endpoint with at least 4 channels.\n"
+        "Tried: "
+        f"{labels}"
+        f"{mac_hint}\n\n"
+        "Fix: fully quit Muvi (and any other app using the Gigaport), "
+        "unplug/replug the Gigaport USB, then press Play again.\n"
+        "On Windows: Sound → Gigaport → Advanced → turn off Exclusive Mode if set."
+    )
+
+
 def _prefer_openable(endpoints: list[dict[str, Any]]) -> dict[str, Any]:
     """Pick the best endpoint in a unit for opening (WASAPI Speakers / Multi first).
 
@@ -419,12 +533,13 @@ def _prefer_openable(endpoints: list[dict[str, Any]]) -> dict[str, Any]:
         speakers = _is_wasapi_speakers(d)
         name = str(d.get("name", "")).lower()
         multi = "multi" in name
+        # WASAPI Speakers before anything WDM-KS, even Multi aggregates.
         return (
-            ch_pair,           # prefer non-pair endpoints
-            not speakers,      # then WASAPI Speakers
-            not multi,         # then Multi / aggregate
+            ch_pair,           # never first: CH-pair Line Outs
             not wasapi,        # WASAPI before WDM-KS
-            not wdm,
+            not speakers,      # WASAPI Speakers first
+            not multi,         # then Multi / aggregate
+            wdm,               # deprioritize WDM-KS
             -int(d.get("channels", 0)),
             int(d.get("index", 0)),
         )
@@ -432,10 +547,15 @@ def _prefer_openable(endpoints: list[dict[str, Any]]) -> dict[str, Any]:
     return sorted(pool, key=_rank)[0]
 
 
-def _probe_unit_vibration(
+def _probe_candidates(
     endpoints: list[dict[str, Any]],
+    *,
+    wasapi_only: bool = False,
+    allow_ch_pairs: bool = False,
+    allow_wdm: bool = True,
+    min_channels: int = 4,
 ) -> tuple[dict[str, Any], int] | None:
-    """Try unit endpoints in preference order until one opens for vibration."""
+    """Probe endpoints in preference order; return first that opens with >= min_channels."""
     preferred = [
         d
         for d in endpoints
@@ -446,24 +566,120 @@ def _probe_unit_vibration(
     def _rank(d: dict[str, Any]) -> tuple:
         api = str(d.get("hostapi", "")).lower()
         return (
-            _is_ch_pair_endpoint(d),  # never first choice for vibration
-            not _is_wasapi_speakers(d),
+            _is_ch_pair_endpoint(d),
             "wasapi" not in api,
-            "wdm" not in api,
+            not _is_wasapi_speakers(d),
+            "wdm" in api,
             -int(d.get("channels", 0)),
             int(d.get("index", 0)),
         )
 
-    fallback: tuple[dict[str, Any], int] | None = None
     for cand in sorted(pool, key=_rank):
-        ch = probe_output_channels(cand["index"], 44100, (8, 6, 4, 2))
-        if ch is None:
+        api = str(cand.get("hostapi", "")).lower()
+        if wasapi_only and "wasapi" not in api:
             continue
-        if ch >= 4:
-            return cand, ch
-        if fallback is None:
-            fallback = (cand, ch)
-    return fallback
+        if not allow_wdm and "wdm" in api:
+            continue
+        if not allow_ch_pairs and _is_ch_pair_endpoint(cand):
+            continue
+        # Never accept stereo-only (2ch) — that selected Mac's 2ch 'GIGAPORT eX'
+        # and then crashed in _validate_output_device asking for 8ch.
+        ch = probe_output_channels(cand["index"], 44100, (8, 6, 4))
+        if ch is None or ch < min_channels:
+            continue
+        return cand, ch
+    return None
+
+
+def _probe_unit_vibration(
+    endpoints: list[dict[str, Any]],
+) -> tuple[dict[str, Any], int] | None:
+    """Try unit endpoints until one opens for vibration (>=4 ch).
+
+    Pass order:
+      1) WASAPI non-pair endpoints (drives real Gigaport transducers)
+      2) WASAPI CH-pair Line Outs
+      3) WDM-KS only as last resort — opens but often produces NO physical signal
+    """
+    hit = _probe_candidates(
+        endpoints, wasapi_only=True, allow_ch_pairs=False, allow_wdm=False
+    )
+    if hit is not None:
+        return hit
+    hit = _probe_candidates(
+        endpoints, wasapi_only=True, allow_ch_pairs=True, allow_wdm=False
+    )
+    if hit is not None:
+        return hit
+    # WDM-KS last — known to open silently on this hardware; only if WASAPI gone.
+    hit = _probe_candidates(
+        endpoints, wasapi_only=False, allow_ch_pairs=False, allow_wdm=True
+    )
+    if hit is not None:
+        return hit
+    return _probe_candidates(
+        endpoints, wasapi_only=False, allow_ch_pairs=True, allow_wdm=True
+    )
+
+
+def _probe_vibration_with_retry(
+    endpoints: list[dict[str, Any]],
+    *,
+    all_gigaport_endpoints: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], int] | None:
+    """Probe preferring WASAPI; refresh/retry before accepting silent WDM-KS.
+
+    WDM-KS Multi can pass check_output_settings and still drive nothing on the
+    shakers. Exhaust WASAPI (with PortAudio refresh) before falling back.
+    """
+    pools: list[list[dict[str, Any]]] = [list(endpoints)]
+    if all_gigaport_endpoints:
+        pools.append(list(all_gigaport_endpoints))
+
+    wasapi_hit: tuple[dict[str, Any], int] | None = None
+    any_hit: tuple[dict[str, Any], int] | None = None
+
+    for attempt in range(3):
+        for pool in pools:
+            # WASAPI-only first every attempt.
+            hit = _probe_candidates(
+                pool, wasapi_only=True, allow_ch_pairs=False, allow_wdm=False
+            )
+            if hit is None:
+                hit = _probe_candidates(
+                    pool, wasapi_only=True, allow_ch_pairs=True, allow_wdm=False
+                )
+            if hit is not None:
+                return hit
+
+            # Remember a non-WASAPI fallback but keep retrying WASAPI.
+            fallback = _probe_unit_vibration(pool)
+            if fallback is not None:
+                api = str(fallback[0].get("hostapi", "")).lower()
+                if "wasapi" in api:
+                    return fallback
+                if any_hit is None:
+                    any_hit = fallback
+
+        if attempt >= 2:
+            break
+
+        time.sleep(0.2 * (attempt + 1))
+        refresh_portaudio()
+        refreshed = list_output_devices()
+        refreshed_giga = [d for d in refreshed if d.get("is_gigaport")]
+        if not refreshed_giga:
+            continue
+
+        names = {(str(d.get("name")), str(d.get("hostapi"))) for d in endpoints}
+        rematched = [
+            d
+            for d in refreshed_giga
+            if (str(d.get("name")), str(d.get("hostapi"))) in names
+        ] or refreshed_giga
+        pools = [rematched, refreshed_giga]
+
+    return any_hit
 
 
 def _physical_gigaport_unit_count(units: dict[str, list[dict[str, Any]]]) -> int:
@@ -485,7 +701,7 @@ def _physical_gigaport_unit_count(units: dict[str, list[dict[str, Any]]]) -> int
     units_with_speakers = sum(
         1
         for endpoints in units.values()
-        if any(_multichannel_wasapi_speakers(d) for d in endpoints)
+        if any(_main_wasapi_speakers(d) for d in endpoints)
     )
     if units_with_speakers >= 1:
         return units_with_speakers
@@ -691,11 +907,12 @@ def pick_output_devices(
         # ranked pick can be a WDM-KS CH1&2 Line Out that fails as 8ch (common
         # when a USB codec is also present and Windows reorders endpoints).
         vib_endpoints = units.get(vib_unit or "", [vib])
-        probed = _probe_unit_vibration(vib_endpoints)
+        all_giga = [d for endpoints in units.values() for d in endpoints]
+        probed = _probe_vibration_with_retry(
+            vib_endpoints, all_gigaport_endpoints=all_giga
+        )
         if probed is None:
-            raise RuntimeError(
-                f"Cannot open vibration output on {_device_label(vib)}"
-            )
+            raise RuntimeError(_vibration_open_error(vib, vib_endpoints))
         vib, vib_ch = probed
         # Gigaport audio must open as 8ch when possible. A 4ch WASAPI Speakers
         # stream is often treated as front+surround, and Windows remaps the
@@ -706,7 +923,8 @@ def pick_output_devices(
             audio_ch = probe_output_channels(audio["index"], 44100, (4, 2))
         if audio_ch is None:
             raise RuntimeError(
-                f"Cannot open audio output on {_device_label(audio)}"
+                f"Cannot open audio output on {_device_label(audio)}\n\n"
+                "Close other apps using that device, then try again."
             )
         if vib_ch < 8:
             meta["warnings"].append(
@@ -722,11 +940,13 @@ def pick_output_devices(
         return vib, audio, "dual_native", meta
 
     if layout == "single":
-        probed = _probe_unit_vibration(units.get(vib_unit or "", [vib]))
+        vib_endpoints = units.get(vib_unit or "", [vib])
+        all_giga = [d for endpoints in units.values() for d in endpoints]
+        probed = _probe_vibration_with_retry(
+            vib_endpoints, all_gigaport_endpoints=all_giga
+        )
         if probed is None:
-            raise RuntimeError(
-                f"Cannot open output stream on {_device_label(vib)}"
-            )
+            raise RuntimeError(_vibration_open_error(vib, vib_endpoints))
         vib, single_ch = probed
         if single_ch < 6:
             meta["warnings"].append(
@@ -737,11 +957,13 @@ def pick_output_devices(
         return vib, audio, "single", meta
 
     # vibration_only
-    probed = _probe_unit_vibration(units.get(vib_unit or "", [vib]))
+    vib_endpoints = units.get(vib_unit or "", [vib])
+    all_giga = [d for endpoints in units.values() for d in endpoints]
+    probed = _probe_vibration_with_retry(
+        vib_endpoints, all_gigaport_endpoints=all_giga
+    )
     if probed is None:
-        raise RuntimeError(
-            f"Cannot open vibration output on {_device_label(vib)}"
-        )
+        raise RuntimeError(_vibration_open_error(vib, vib_endpoints))
     vib, vib_ch = probed
     if vib_ch < 8:
         meta["warnings"].append(

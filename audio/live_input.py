@@ -29,6 +29,7 @@ from audio.gigaport_routing import (
     build_vibration_only_block,
     output_channels_for_layout,
 )
+from audio.haptics_dsp import HapticDSP
 from audio.output_devices import wasapi_output_extra
 from audio.vibration_presets import (
     SATORI_OUTPUT_CHANNELS,
@@ -737,7 +738,8 @@ class LiveAudioEngine:
         self.vibration_overlay = False
         self.output_layout: OutputLayout = "single"
         self.speaker_route: SpeakerRoute = "headphones"
-        self.vibration_mode: VibrationMode = "zones"
+        self.vibration_mode: VibrationMode = "haptics"
+        self._haptic_dsp: HapticDSP | None = None
         self.output_channel_count = SATORI_OUTPUT_CHANNELS
         self.vibration_output_channels: int | None = None
         self.audio_output_channel_count = 4
@@ -798,9 +800,26 @@ class LiveAudioEngine:
         self.speaker_route = route
 
     def set_vibration_mode(self, mode: VibrationMode) -> None:
-        if mode not in ("zones", "stereo"):
+        if mode not in ("zones", "stereo", "haptics"):
             raise ValueError(f"Unknown vibration mode: {mode}")
+        prev = self.vibration_mode
         self.vibration_mode = mode
+        # Reset Quake filter state when entering/leaving haptics to avoid bleed.
+        if mode == "haptics" or prev == "haptics":
+            self._reset_haptic_dsp()
+
+    def _reset_haptic_dsp(self) -> None:
+        self._haptic_dsp = None
+
+    def _ensure_haptic_dsp(self) -> HapticDSP:
+        if self._haptic_dsp is None:
+            self._haptic_dsp = HapticDSP(
+                fs=PROCESSING_SR,
+                mode="smart",
+                n_out=8,
+                block=BLOCKSIZE,
+            )
+        return self._haptic_dsp
 
     def set_output_channel_plan(
         self,
@@ -830,13 +849,83 @@ class LiveAudioEngine:
             stereo = resample_if_needed(stereo, PROCESSING_SR, self.output_sample_rate)
         return (stereo * self._effective_audio_gain()).astype(np.float32)
 
+    def _render_haptics_only(
+        self,
+        capture: np.ndarray,
+        *,
+        already_processing_sr: bool = False,
+    ) -> np.ndarray:
+        """Quake HapticDSP → 8 Gigaport channels with per-zone intensity applied."""
+        if not already_processing_sr:
+            capture = self._stereo_capture_block(capture)
+        else:
+            capture = ensure_stereo(capture).astype(np.float32, copy=False)
+        frames = len(capture)
+        if frames <= 0:
+            return np.zeros((0, 8), dtype=np.float32)
+
+        dsp = self._ensure_haptic_dsp()
+        # HapticDSP expects (2, N)
+        out = dsp.process(capture.T)  # (8, N)
+        vib = out.T.astype(np.float32, copy=False)  # (N, 8)
+
+        # Zone gains map onto channel pairs: head, upper, mid, legs.
+        gains = (
+            self.intensity_head,
+            self.intensity_upper,
+            self.intensity_mid,
+            self.intensity_legs,
+        )
+        for pair_idx, g in enumerate(gains):
+            lo = pair_idx * 2
+            hi = lo + 2
+            if g != 1.0:
+                vib[:, lo:hi] *= float(g)
+
+        if self.output_sample_rate != PROCESSING_SR:
+            vib = resample_if_needed(vib, PROCESSING_SR, self.output_sample_rate)
+
+        head = vib[:, 0:2]
+        upper = vib[:, 2:4]
+        mid = vib[:, 4:6]
+        legs = vib[:, 6:8]
+        rms_head = float(np.sqrt(np.mean(head**2) + 1e-10))
+        rms_upper = float(np.sqrt(np.mean(upper**2) + 1e-10))
+        rms_mid = float(np.sqrt(np.mean(mid**2) + 1e-10))
+        rms_legs = float(np.sqrt(np.mean(legs**2) + 1e-10))
+        bass_energy = float(np.sqrt(np.mean(vib**2) + 1e-10))
+
+        with self.lock:
+            self.stats["rms_legs"] = rms_legs
+            self.stats["rms_mid"] = rms_mid
+            self.stats["rms_upper_mid"] = rms_upper
+            self.stats["rms_head"] = rms_head
+            self.stats["bass_energy"] = bass_energy
+            self.stats["generated_freq_hz"] = 0.0
+
+        return np.clip(vib, -1.0, 1.0)
+
+    @staticmethod
+    def _haptics_to_zones(vib8: np.ndarray) -> np.ndarray:
+        """Collapse 8ch haptics pairs to 4-zone (head, upper, legs, mid) for legacy layouts."""
+        n = len(vib8)
+        vib = np.zeros((n, 4), dtype=np.float32)
+        if n <= 0:
+            return vib
+        # Average L/R per row; zone column order matches LiveStreamProcessor.
+        vib[:, 0] = 0.5 * (vib8[:, 0] + vib8[:, 1])  # head
+        vib[:, 1] = 0.5 * (vib8[:, 2] + vib8[:, 3])  # upper
+        vib[:, 2] = 0.5 * (vib8[:, 6] + vib8[:, 7])  # legs
+        vib[:, 3] = 0.5 * (vib8[:, 4] + vib8[:, 5])  # mid
+        return vib
+
     def _render_vibration_only(
         self,
         capture: np.ndarray,
         *,
         already_processing_sr: bool = False,
     ) -> np.ndarray:
-        """Vibration zones only for Gigaport ch3-6."""
+        """Vibration zones only for Gigaport ch3-6 (muvi-style, not haptics)."""
         if not already_processing_sr:
             capture = self._stereo_capture_block(capture)
         else:
@@ -972,7 +1061,11 @@ class LiveAudioEngine:
         while (len(self._capture_ring) - self._capture_read_idx) - chunk_len >= delay:
             chunk = self._capture_ring[self._capture_read_idx : self._capture_read_idx + chunk_len]
             self._capture_read_idx += chunk_len
-            vib = self._render_vibration_only(chunk, already_processing_sr=True)
+            if self.vibration_mode == "haptics":
+                vib8 = self._render_haptics_only(chunk, already_processing_sr=True)
+                vib = self._haptics_to_zones(vib8)
+            else:
+                vib = self._render_vibration_only(chunk, already_processing_sr=True)
             if self.vibration_overlay:
                 frames = len(vib)
                 block = np.zeros((frames, 6), dtype=np.float32)
@@ -1070,19 +1163,29 @@ class LiveAudioEngine:
         while (len(self._capture_ring) - self._capture_read_idx) - chunk_len >= delay:
             chunk = self._capture_ring[self._capture_read_idx : self._capture_read_idx + chunk_len]
             self._capture_read_idx += chunk_len
-            vib = self._render_vibration_only(chunk, already_processing_sr=True)
+            if self.vibration_mode == "haptics":
+                vib8 = self._render_haptics_only(chunk, already_processing_sr=True)
+            else:
+                vib8 = None
+                vib = self._render_vibration_only(chunk, already_processing_sr=True)
             audio = chunk.astype(np.float32, copy=False) * self._effective_audio_gain()
             if self.output_sample_rate != PROCESSING_SR:
                 audio = resample_if_needed(audio, PROCESSING_SR, self.output_sample_rate)
-            n = min(len(audio), len(vib))
             if self.output_layout in ("dual_native", "vibration_only"):
                 vib_ch = int(
                     self.vibration_output_channels
                     or output_channels_for_layout(self.output_layout)
                 )
-                vib_out = build_vibration_only_block(
-                    vib[:n], channels=vib_ch, mode=self.vibration_mode
-                )
+                if vib8 is not None:
+                    n = min(len(audio), len(vib8))
+                    vib_out = np.zeros((n, vib_ch), dtype=np.float32)
+                    copy_ch = min(vib_ch, vib8.shape[1])
+                    vib_out[:, :copy_ch] = vib8[:n, :copy_ch]
+                else:
+                    n = min(len(audio), len(vib))
+                    vib_out = build_vibration_only_block(
+                        vib[:n], channels=vib_ch, mode=self.vibration_mode
+                    )
                 self._push_vibration_block(vib_out)
                 if (
                     self.output_layout == "dual_native"
@@ -1100,6 +1203,9 @@ class LiveAudioEngine:
                     with self.lock:
                         self._audio_output_ring.append(audio_out)
             else:
+                if vib8 is not None:
+                    vib = self._haptics_to_zones(vib8)
+                n = min(len(audio), len(vib))
                 block = build_output_block(
                     audio[:n],
                     vib[:n],

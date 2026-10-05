@@ -7,7 +7,7 @@ const el = (id) => document.getElementById(id);
 const MockApi = (() => {
   const state = {
     playing: false, play_busy: false, volume: 0.70, vibration: 0.27, highpass_hz: 200, cutoff_hz: 200, position: 0,
-    speaker_route: "headphones", vibration_mode: "zones", output_layout: null,
+    speaker_route: "headphones", vibration_mode: "haptics", output_layout: null,
     live_mode: null,
     zone_enabled: { head: true, upper: true, mid: true, legs: true },
     audio_muted: false,
@@ -125,7 +125,8 @@ const MockApi = (() => {
       return snap();
     },
     set_vibration_mode: async (mode) => {
-      state.vibration_mode = mode === "stereo" ? "stereo" : "zones";
+      state.vibration_mode =
+        mode === "stereo" ? "stereo" : mode === "zones" ? "zones" : "haptics";
       return snap();
     },
     get_audio_settings: async () => ({
@@ -805,27 +806,42 @@ function render(s) {
 
   updateViz(s);
 
-  const playBtn = el("playBtn");
-  // Enable Play only with AUX or Bluetooth ready; keep enabled while Live is on (to Stop).
-  playBtn.disabled = busy || (!liveOn && !canStartLive);
-  playBtn.title = liveOn
-    ? "Stop Live"
-    : (canStartLive ? "Start Live" : (liveInput.message || "Connect AUX or Bluetooth to start"));
-  playBtn.classList.toggle("disabled", playBtn.disabled && !busy);
-  playBtn.classList.toggle("busy", busy);
-  playBtn.setAttribute("aria-busy", busy ? "true" : "false");
-  el("playIcon").innerHTML = busy ? busyIcon : (liveOn ? pauseIcon : playIconSvg);
-
   const connected = (s.devices || []).find((d) => d.id === s.bluetooth.connected_id);
   const online = Boolean(connected);
+  const btSession = Boolean(s.bluetooth.connected_id);
   const connectingId = s.bluetooth.connecting_id || null;
   const connectingDev = connectingId
     ? (s.devices || []).find((d) => d.id === connectingId)
     : null;
 
+  const playBtn = el("playBtn");
+  // Bluetooth session owns Live — no Play/Stop while phone is connected.
+  // AUX (no BT) still uses Play/Stop manually.
+  if (btSession) {
+    playBtn.hidden = true;
+    playBtn.disabled = true;
+    playBtn.title = "Live runs automatically while Bluetooth is connected";
+  } else {
+    playBtn.hidden = false;
+    playBtn.disabled = busy || (!liveOn && !canStartLive);
+    playBtn.title = liveOn
+      ? "Stop Live"
+      : (canStartLive ? "Start Live" : (liveInput.message || "Connect AUX or Bluetooth to start"));
+  }
+  playBtn.classList.toggle("disabled", playBtn.disabled && !busy);
+  playBtn.classList.toggle("busy", busy && !btSession);
+  playBtn.setAttribute("aria-busy", busy && !btSession ? "true" : "false");
+  el("playIcon").innerHTML = busy ? busyIcon : (liveOn ? pauseIcon : playIconSvg);
+
   const hint = el("liveHint");
   if (hint) {
-    if (busy && !demoOn) {
+    if (btSession && liveOn) {
+      hint.textContent = "Bluetooth Live — playing until you disconnect";
+    } else if (btSession && busy) {
+      hint.textContent = "Starting Bluetooth Live…";
+    } else if (btSession && s.engine_error) {
+      hint.textContent = s.engine_error;
+    } else if (busy && !demoOn) {
       hint.textContent = liveOn ? "Stopping…" : "Starting…";
     } else if (s.engine_error && !demoOn) {
       hint.textContent = s.engine_error;
@@ -882,15 +898,21 @@ function render(s) {
     el(spkId)?.classList.toggle("active", route === "secondary");
   });
 
-  // Vibration routing: "zones" (per body row) vs "stereo" (L/R shakers).
-  const vibMode = s.vibration_mode === "stereo" ? "stereo" : "zones";
+  // Vibration routing: "zones" | "stereo" | "haptics".
+  const vibMode =
+    s.vibration_mode === "stereo"
+      ? "stereo"
+      : s.vibration_mode === "zones"
+        ? "zones"
+        : "haptics";
   [
-    ["vibModeCard", "vibModeZones", "vibModeStereo"],
-    ["demoVibModeCard", "demoVibModeZones", "demoVibModeStereo"],
-  ].forEach(([cardId, zonesId, stereoId]) => {
+    ["vibModeCard", "vibModeZones", "vibModeStereo", "vibModeHaptics"],
+    ["demoVibModeCard", "demoVibModeZones", "demoVibModeStereo", "demoVibModeHaptics"],
+  ].forEach(([cardId, zonesId, stereoId, hapticsId]) => {
     el(cardId)?.classList.toggle("hidden", !SHOW_VIBRATION_MODE_SWITCH);
     el(zonesId)?.classList.toggle("active", vibMode === "zones");
     el(stereoId)?.classList.toggle("active", vibMode === "stereo");
+    el(hapticsId)?.classList.toggle("active", vibMode === "haptics");
   });
 
   // Demo screen
@@ -1047,12 +1069,13 @@ function render(s) {
     sub = "Waiting for confirmation on the phone…";
   } else if (connectingId) {
     sub = "Please wait — opening Bluetooth audio connection…";
-  } else if (online && s.engine_error) sub = `BT connected, but Start Live failed: ${s.engine_error}`;
-  else if (online && liveOn && s.capture_name) sub = `Live ON · capturing ${s.capture_name}`;
+  }   else if (online && s.engine_error) sub = `BT connected, but Live failed: ${s.engine_error}`;
+  else if (online && liveOn && s.capture_name) sub = `Live ON · capturing ${s.capture_name} — disconnect phone to stop`;
+  else if (online && liveOn) sub = "Live ON — play music on the phone. Disconnect to stop.";
   else if (online && s.engine_ok === false) sub = `BT connected, engine unavailable: ${s.engine_error || "unknown"}`;
   else if (!online && bt.error) sub = bt.error;
   else if (!online && bt.supported === false) sub = "Bluetooth receiver unavailable on this machine (Windows only).";
-  else if (online) sub = "Connected — play music on the phone, then go to Now Playing and press Play.";
+  else if (online) sub = "Connected — Live starts automatically. Play music on the phone.";
   else if (bt.scanning || bt.discovering) sub = "Scanning nearby — put the phone in pairing mode…";
   el("statusSub").textContent = sub;
   const forgetting = Boolean(bt.forgetting);
@@ -1238,6 +1261,8 @@ function wire() {
 
   el("playBtn").addEventListener("click", async () => {
     if (playClickLock) return;
+    // Bluetooth session owns Live — Play/Stop not used while phone is connected.
+    if (lastState.bluetooth && lastState.bluetooth.connected_id) return;
     const wasPlaying = Boolean(lastState.playing);
     const inputReady = Boolean(lastState.live_input && lastState.live_input.ready);
     if (!wasPlaying && !inputReady) return;
@@ -1336,7 +1361,7 @@ function wire() {
 
   document.querySelectorAll(".vib-mode-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      const mode = btn.getAttribute("data-vibmode") || "zones";
+      const mode = btn.getAttribute("data-vibmode") || "haptics";
       if (api.set_vibration_mode) {
         render(await api.set_vibration_mode(mode));
       }

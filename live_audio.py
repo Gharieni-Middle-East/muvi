@@ -10,6 +10,7 @@ So a plugged-in Behringer no longer steals capture while the phone is on Bluetoo
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from sounddevice import PortAudioError
@@ -278,12 +279,21 @@ def start_live_audio(
     synthetic_type_id: str = "sine",
     prefer_bluetooth: bool = False,
     speaker_route: SpeakerRoute = "headphones",
-    vibration_mode: VibrationMode = "zones",
+    vibration_mode: VibrationMode = "haptics",
     vibration_output_index: int | None = None,
     audio_output_index: int | None = None,
     roles_flipped: bool = False,
 ) -> dict[str, Any]:
     """Start Live: BT session → CABLE; else AUX if present; else CABLE."""
+    # Release any previous Gigaport stream BEFORE probing — a held exclusive
+    # lock makes check_output_settings fail on every endpoint (WDM-KS or WASAPI).
+    if _live_engine.is_active:
+        _live_engine.stop()
+    _gigaport.stop()
+    _gigaport.release_output_device()
+    # Let Windows finish releasing the device before PortAudio probes again.
+    time.sleep(0.2)
+
     capture, mode = _pick_capture(
         vibration_overlay=vibration_overlay,
         prefer_bluetooth=prefer_bluetooth,
@@ -323,8 +333,6 @@ def start_live_audio(
         flush=True,
     )
 
-    _gigaport.stop()
-    _gigaport.release_output_device()
     _live_engine.set_output_layout(layout)
     _live_engine.set_speaker_route(speaker_route)
     _live_engine.set_vibration_mode(vibration_mode)

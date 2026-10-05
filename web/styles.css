@@ -878,10 +878,10 @@ html, body {
   color: #5ac8fa;
 }
 
-/* Vibration routing toggle (Zones vs Stereo L/R) */
+/* Vibration routing toggle (Zones / Stereo / Haptics) */
 .vib-mode-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 6px;
   margin-top: 10px;
   padding-top: 10px;
