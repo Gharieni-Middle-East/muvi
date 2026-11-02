@@ -1,0 +1,101 @@
+# Builds Muvi on a git tag and publishes it to the public releases repo,
+# where tablets check for updates via the GitHub Releases API.
+#
+#   v1.0.2           -> normal release, becomes "latest" (tablets will update)
+#   v1.0.2-beta.1    -> pre-release, ignored by /releases/latest (safe for testing)
+#
+# The tag must match APP_VERSION in web/constants/constants.js (without "v").
+#
+# Requires repo secret RELEASES_TOKEN: fine-grained token,
+# repo Gharieni-Middle-East/muvi-releases, Contents: Read and write.
+
+name: Release build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASES_REPO: Gharieni-Middle-East/muvi-releases
+
+jobs:
+  build:
+    name: Build (${{ matrix.lang }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        lang: [en]
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-build-win.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build-win.txt
+
+      - name: Build release zip
+        run: python .github/scripts/build_release.py --tag "${{ github.ref_name }}" --lang ${{ matrix.lang }}
+
+      - name: Hand zip to publish job
+        uses: actions/upload-artifact@v5
+        with:
+          name: muvi-${{ matrix.lang }}
+          path: release/
+          retention-days: 1       # keep private-repo artifact storage near zero
+          compression-level: 0    # already zipped
+          if-no-files-found: error
+
+  publish:
+    name: Publish to muvi-releases
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Collect build outputs
+        uses: actions/download-artifact@v5
+        with:
+          pattern: muvi-*
+          path: release
+          merge-multiple: true
+
+      - name: Create or update release
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cat *.zip.sha256 > SHA256SUMS.txt
+          echo "SHA256SUMS.txt:" && cat SHA256SUMS.txt
+
+          flags=()
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+
+          if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+            echo "Release $TAG exists - replacing assets"
+            gh release upload "$TAG" *.zip SHA256SUMS.txt --repo "$RELEASES_REPO" --clobber
+          else
+            gh release create "$TAG" *.zip SHA256SUMS.txt \
+              --repo "$RELEASES_REPO" \
+              --title "Muvi $TAG" \
+              --notes-file notes.md \
+              "${flags[@]}"
+          fi

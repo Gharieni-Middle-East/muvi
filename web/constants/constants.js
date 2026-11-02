@@ -1,7 +1,7 @@
 // muve — shared UI constants. Loaded before app.js.
 
 // App version, shown in the sidebar under the app name.
-const APP_VERSION = "1.0.1";
+const APP_VERSION = "1.0.2";
 
 // Show/hide the Zones / Stereo / Haptics vibration-routing toggle in the UI.
 // "haptics" is the default vibration mode regardless of this flag.

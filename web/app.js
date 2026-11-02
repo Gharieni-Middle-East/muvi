@@ -777,6 +777,9 @@ function render(s) {
   const liveOn = isLivePlaying(s);
   const demoOn = isDemoPlaying(s);
   renderHardwareStatus(s.hardware, liveOn || demoOn, s);
+  // Settings -> Software update and the Wi-Fi screen (update_wifi.js).
+  if (typeof renderUpdate === "function") renderUpdate(s);
+  if (typeof renderWifi === "function") renderWifi(s);
   // Pop pairing guidance once (e.g. status 19 FAILED → forget on phone).
   const alertMsg = s.bluetooth && s.bluetooth.alert;
   if (alertMsg && alertMsg !== lastBtAlert) {

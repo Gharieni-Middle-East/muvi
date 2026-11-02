@@ -17,6 +17,9 @@ _REQUIRED = [
     ("winrt.windows.devices.enumeration", "winrt-Windows.Devices.Enumeration"),
     ("winrt.windows.devices.bluetooth", "winrt-Windows.Devices.Bluetooth"),
     ("winrt.windows.system", "winrt-Windows.System"),
+    ("winrt.windows.devices.wifi", "winrt-Windows.Devices.WiFi"),
+    ("winrt.windows.networking.connectivity", "winrt-Windows.Networking.Connectivity"),
+    ("winrt.windows.security.credentials", "winrt-Windows.Security.Credentials"),
 ]
 
 

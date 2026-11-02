@@ -1,0 +1,17 @@
+# Windows build dependencies for CI (.github/workflows/release.yml), Python 3.11.
+# Once a CI build is confirmed on a tablet, pin these to exact versions
+# (`python -m pip freeze` on the build machine) so every build is the same.
+# requirements.txt stays as-is for local development.
+-r requirements.txt
+
+# Online updates (UpdateManager.py)
+requests>=2.31
+certifi>=2024.2.2
+
+# Wi-Fi screen (WifiManager.py) - Windows' built-in Wi-Fi API
+winrt-Windows.Devices.WiFi>=3.2.1
+winrt-Windows.Networking.Connectivity>=3.2.1
+winrt-Windows.Security.Credentials>=3.2.1
+
+# Packaging
+pyinstaller>=6.6

@@ -12,6 +12,13 @@ import threading
 import time
 from typing import Any
 
+# "main.exe --watchdog --pid N": tiny process that restarts the app if it exits.
+# Handled first so it stays small (no webview, no WinRT).
+if "--watchdog" in sys.argv:
+    import AppWatchdog
+
+    raise SystemExit(AppWatchdog.run_watchdog(sys.argv))
+
 # Frozen exe doubles as the audio worker (sys.executable is main.exe, not python).
 # Must run before webview/WinRT imports — WinRT in-process breaks ASIO.
 if "--engine-worker" in sys.argv:
@@ -21,12 +28,15 @@ if "--engine-worker" in sys.argv:
 
 import webview
 
+import AppWatchdog
+import UpdateManager
 from bt_audio import BluetoothAudioService
 from battery_manager import BatteryManager
 from engine_bridge import EngineBridge
 from hardware_monitor import probe_hardware_status
 from live_audio import probe_live_input
 from media_session import MediaSessionService
+from wifi_service import WifiService
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
@@ -127,6 +137,11 @@ class Api:
         self._last_paired_refresh = 0.0
         self._paired_refresh_busy = False
         self._battery = BatteryManager()
+        # Online updates (Settings -> Software update) and Wi-Fi (Wi-Fi screen).
+        self._window: Any = None
+        self._updater = UpdateManager.UpdateController(on_quit=self._quit_for_update)
+        self._wifi = WifiService()
+        self._update_notice = UpdateManager.take_update_notice()
         self._hardware_last_poll = 0.0
         self._hardware_cache: dict[str, Any] = {
             "gigaport_connected": False,
@@ -425,6 +440,10 @@ class Api:
         snap["devices"] = [dict(d) for d in self._devices]
         snap["nearby_devices"] = [dict(d) for d in self._nearby]
         snap["hardware"] = dict(self._hardware_cache)
+        snap["app_version"] = UpdateManager.current_version()
+        snap["update"] = self._updater.snapshot()
+        snap["update_notice"] = self._update_notice
+        snap["wifi"] = self._wifi.snapshot()
         return snap
 
     # -------------------------------------------------------- Start / Stop Live --
@@ -1156,8 +1175,61 @@ class Api:
         threading.Thread(target=_work, daemon=True, name="bt-forget-all").start()
         return snap
 
+    # ----------------------------------------- Software update (Settings) --
+    def update_check(self) -> dict[str, Any]:
+        self._updater.check()
+        return self.get_state()
+
+    def update_install(self) -> dict[str, Any]:
+        self._updater.install()
+        return self.get_state()
+
+    def update_cancel(self) -> dict[str, Any]:
+        self._updater.cancel()
+        return self.get_state()
+
+    def clear_update_notice(self) -> dict[str, Any]:
+        self._update_notice = None
+        return self.get_state()
+
+    def _quit_for_update(self) -> None:
+        """The apply script is waiting for this process to exit (called from a worker thread)."""
+        try:
+            self._engine.stop_live()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[update] stop engine: {exc}")
+        try:
+            if self._bt.available:
+                self._bt.disconnect(forget=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[update] bt disconnect: {exc}")
+        # If a background thread keeps the process alive, exit anyway.
+        killer = threading.Timer(8.0, lambda: os._exit(0))
+        killer.daemon = True
+        killer.start()
+        try:
+            if self._window is not None:
+                self._window.destroy()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[update] close window: {exc}")
+            os._exit(0)
+
+    # ------------------------------------------------------------------- Wi-Fi --
+    def wifi_scan(self) -> dict[str, Any]:
+        self._wifi.scan()
+        return self.get_state()
+
+    def wifi_connect(self, ssid: str, password: str | None = None) -> dict[str, Any]:
+        self._wifi.connect(str(ssid or ""), password or None)
+        return self.get_state()
+
+    def wifi_disconnect(self) -> dict[str, Any]:
+        self._wifi.disconnect()
+        return self.get_state()
+
 
 def main() -> None:
+    AppWatchdog.start_if_needed()   # kiosk session only: restart the app if it closes/crashes
     api = Api()
     window = webview.create_window(
         "muve",
@@ -1169,6 +1241,13 @@ def main() -> None:
         fullscreen=FULLSCREEN,
         background_color="#0b0b0f",
     )
+    api._window = window
+
+    def _on_loaded() -> None:
+        # The new version is up - tells the update script not to roll back.
+        UpdateManager.mark_started()
+
+    window.events.loaded += _on_loaded
 
     def _on_closing() -> None:
         api._engine.stop_live()

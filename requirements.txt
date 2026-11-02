@@ -18,6 +18,12 @@ winrt-Windows.Devices.Radios>=3.2.1 ; sys_platform == "win32"
 winrt-Windows.Foundation>=3.2.1 ; sys_platform == "win32"
 winrt-Windows.Foundation.Collections>=3.2.1 ; sys_platform == "win32"
 winrt-Windows.System>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Devices.WiFi>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Networking.Connectivity>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Security.Credentials>=3.2.1 ; sys_platform == "win32"
+
+# Online updates from GitHub Releases
+requests>=2.31
 
 # Set Windows default playback to VB-Cable on Play
 pycaw>=20240210 ; sys_platform == "win32"

@@ -31,6 +31,10 @@
           <svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Bluetooth</span>
         </button>
+        <button class="nav-item" data-screen="wifi">
+          <svg viewBox="0 0 24 24"><path d="M2 8.5a15 15 0 0120 0M5 12a10 10 0 0114 0M8.5 15.5a5 5 0 017 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="19" r="1.4" fill="currentColor"/></svg>
+          <span>Wi-Fi</span>
+        </button>
         <button class="nav-item" data-screen="settings">
           <svg viewBox="0 0 24 24"><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V22a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 0 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H2a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H22a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
           <span>Settings</span>
@@ -352,6 +356,42 @@
         </div>
       </section>
 
+      <!-- WI-FI -->
+      <section class="screen" id="screen-wifi">
+        <header class="screen-head">
+          <div>
+            <h1>Wi-Fi</h1>
+            <p class="subtle">Connect to the internet for software updates.</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn-primary" id="wifiScanBtn">
+              <span class="scan-spinner"></span>
+              <span id="wifiScanLabel">Scan</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="status-card" id="wifiStatusCard">
+          <div class="status-icon">
+            <svg viewBox="0 0 24 24"><path d="M2 8.5a15 15 0 0120 0M5 12a10 10 0 0114 0M8.5 15.5a5 5 0 017 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="19" r="1.4" fill="currentColor"/></svg>
+          </div>
+          <div class="status-text">
+            <strong id="wifiStatusTitle">Not connected</strong>
+            <span class="subtle" id="wifiStatusSub">Scan to see the networks nearby.</span>
+          </div>
+          <div class="status-actions">
+            <button class="btn-ghost" id="wifiDisconnectBtn" hidden>Disconnect</button>
+          </div>
+        </div>
+
+        <div class="wifi-message" id="wifiMessage" hidden></div>
+
+        <div class="bt-section bt-section-paired">
+          <h2 class="list-title">Networks</h2>
+          <ul class="device-list" id="wifiList"></ul>
+        </div>
+      </section>
+
       <section class="screen" id="screen-settings">
         <header class="screen-head">
           <div>
@@ -359,6 +399,23 @@
             <p class="subtle">Status updates automatically when you plug or unplug hardware.</p>
           </div>
         </header>
+        <div class="update-card" id="updateCard">
+          <div class="update-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </div>
+          <div class="update-text">
+            <strong>Software update</strong>
+            <span class="update-status" id="updateStatus">Version —</span>
+            <div class="update-progress" id="updateProgress" hidden><div class="update-bar" id="updateBar"></div></div>
+          </div>
+          <div class="update-actions">
+            <button class="btn-ghost" id="updateWifiBtn" hidden>Open Wi-Fi</button>
+            <button class="btn-primary" id="updateBtn">
+              <span class="scan-spinner"></span>
+              <span id="updateBtnLabel">Check for updates</span>
+            </button>
+          </div>
+        </div>
         <ul class="hw-detail-list" id="hwDetailList" aria-label="Hardware status">
           <li class="hw-detail-row bad" id="hwRowGigaport">
             <span class="hw-detail-icon" aria-hidden="true">
@@ -404,7 +461,18 @@
     </main>
   </div>
 
+  <!-- Dialog (update confirmation / "updated to version" notice) -->
+  <div class="modal" id="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <h2 id="modalTitle"></h2>
+      <p class="modal-text" id="modalText"></p>
+      <pre class="modal-notes" id="modalNotes" hidden></pre>
+      <div class="modal-actions" id="modalActions"></div>
+    </div>
+  </div>
+
   <script src="constants/constants.js"></script>
   <script src="app.js"></script>
+  <script src="update_wifi.js"></script>
 </body>
 </html>
