@@ -44,6 +44,10 @@ PROCESSING_SR = TARGET_SR
 
 MUVI_HIGHPASS_HZ = 30.0
 MUVI_LOWPASS_HZ = 180.0
+# Bass depth slider range; haptics band tilt is neutral at the UI default cutoff.
+CUTOFF_HZ_MIN = 40.0
+CUTOFF_HZ_MAX = 250.0
+HAPTIC_NEUTRAL_CUTOFF_HZ = 200.0
 MUVI_FILTER_ORDER = 4
 MUVI_LIMIT_DB = -1.0
 MUVI_MASTER_GAIN = 1.0
@@ -812,14 +816,24 @@ class LiveAudioEngine:
         self._haptic_dsp = None
 
     def _ensure_haptic_dsp(self) -> HapticDSP:
-        if self._haptic_dsp is None:
-            self._haptic_dsp = HapticDSP(
+        dsp = self._haptic_dsp
+        if dsp is None:
+            dsp = HapticDSP(
                 fs=PROCESSING_SR,
                 mode="smart",
                 n_out=8,
                 block=BLOCKSIZE,
             )
-        return self._haptic_dsp
+            dsp.set_bass_tilt(self._haptic_bass_tilt())
+            self._haptic_dsp = dsp
+        return dsp
+
+    def _haptic_bass_tilt(self) -> float:
+        """Bass depth slider → HapticDSP band tilt (-1..1), 0 at the default cutoff."""
+        hz = float(self.lowpass_hz)
+        if hz >= HAPTIC_NEUTRAL_CUTOFF_HZ:
+            return (hz - HAPTIC_NEUTRAL_CUTOFF_HZ) / (CUTOFF_HZ_MAX - HAPTIC_NEUTRAL_CUTOFF_HZ)
+        return (hz - HAPTIC_NEUTRAL_CUTOFF_HZ) / (HAPTIC_NEUTRAL_CUTOFF_HZ - CUTOFF_HZ_MIN)
 
     def set_output_channel_plan(
         self,
@@ -1274,8 +1288,12 @@ class LiveAudioEngine:
 
     def set_lowpass_hz(self, hz: float) -> None:
         """Bass cutoff — muvi vibe_lowpass_hz / --cutoff."""
-        self.lowpass_hz = float(np.clip(hz, 40.0, 250.0))
+        self.lowpass_hz = float(np.clip(hz, CUTOFF_HZ_MIN, CUTOFF_HZ_MAX))
         self.processor.set_lowpass_hz(self.lowpass_hz)
+        # Haptics mode bypasses self.processor; drive its band tilt instead.
+        dsp = self._haptic_dsp
+        if dsp is not None:
+            dsp.set_bass_tilt(self._haptic_bass_tilt())
 
     def set_zone_intensities(
         self,

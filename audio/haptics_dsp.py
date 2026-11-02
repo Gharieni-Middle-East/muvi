@@ -33,6 +33,7 @@ COMP_RELEASE_S = 0.250
 LIMIT_CEILING = 10 ** (-3 / 20)  # outputs stay below -3 dBFS before per-channel calibration
 LIMIT_RELEASE_S = 0.300
 MIN_DECAY, MAX_DECAY = 0.997869, 1.002131  # level min/max tracker drift (from the app)
+BASS_TILT_DB = 6.0  # max low-band lift / high-band cut from the Bass depth slider
 EPS = 1e-10
 
 
@@ -75,7 +76,15 @@ class HapticDSP:
         self.lvl_min, self.lvl_max = -60.0, -20.0
         self.prev_gain = np.zeros(6)  # start silent and ramp up
         self.lim = np.ones(n_out)  # limiter gain per output
+        self.band_gain = np.ones(6)  # Bass depth tilt per source
         self.set_mix(channel_map or default_channel_map(n_out), master_gain_db)
+
+    def set_bass_tilt(self, tilt):
+        """tilt -1..1: +1 lifts the low band and cuts the high band by BASS_TILT_DB,
+        -1 does the reverse, 0 is neutral. Applied through the per-block gain ramp."""
+        t_db = float(np.clip(tilt, -1.0, 1.0)) * BASS_TILT_DB
+        lo, hi = 10 ** (t_db / 20), 10 ** (-t_db / 20)
+        self.band_gain = np.array([lo, 1.0, hi, lo, 1.0, hi])
 
     def set_mix(self, channel_map, master_gain_db=0.0):
         """channel_map: list of n_out lists of [source_name, gain_db]."""
@@ -140,7 +149,8 @@ class HapticDSP:
             gain[:3] *= 10 ** (bal / 20)
             gain[3:] *= 10 ** (-bal / 20)
 
-        ramp = np.linspace(0.0, 1.0, n, endpoint=False)[None, :]
+        gain = gain * self.band_gain
+        ramp =np.linspace(0.0, 1.0, n, endpoint=False)[None, :]
         g = self.prev_gain[:, None] + (gain - self.prev_gain)[:, None] * ramp
         self.prev_gain = gain
         out = self.mix @ (y * g)
