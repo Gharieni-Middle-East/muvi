@@ -121,20 +121,33 @@ def start_demo_audio(
     audio_output_index: int | None = None,
     roles_flipped: bool = False,
     loop: bool = True,
+    silent: bool = False,
 ) -> dict[str, Any]:
-    """Play demo.wav through LiveAudioEngine → Gigaport (same as Bluetooth Live)."""
+    """Play demo.wav through LiveAudioEngine → Gigaport (same as Bluetooth Live).
+
+    silent=True plays looping silence instead: opens the same outputs so the haptics
+    calibration tone can run when nothing else is playing (no sound in the headphones).
+    """
     if _engine is None or _gigaport is None:
         raise RuntimeError("Demo engine not bound — start via engine_worker")
 
-    resolved = resolve_demo_path(path)
-    pcm, sr = load_wav_stereo(resolved)
-    duration = float(len(pcm)) / float(sr) if sr > 0 else 0.0
+    if silent:
+        resolved = "calibration"
+        sr = 44100
+        pcm = np.zeros((sr * 2, 2), dtype=np.float32)
+        duration = 0.0
+        title, artist = "Calibration", "Haptics calibration"
+    else:
+        resolved = resolve_demo_path(path)
+        pcm, sr = load_wav_stereo(resolved)
+        duration = float(len(pcm)) / float(sr) if sr > 0 else 0.0
+        title, artist = "Demo", "MUVI test track"
     _demo_meta.update(
         {
             "path": resolved,
             "duration": duration,
-            "title": "Demo",
-            "artist": "MUVI test track",
+            "title": title,
+            "artist": artist,
             "album": "",
         }
     )

@@ -221,8 +221,10 @@ class EngineBridge:
         zone_enabled: dict[str, bool] | None = None,
         audio_muted: bool = False,
         vibration_muted: bool = False,
+        silent: bool = False,
     ) -> dict[str, Any]:
-        """Play assets/demo.wav through the same Gigaport vibration path."""
+        """Play assets/demo.wav through the same Gigaport vibration path.
+        silent=True plays silence instead (outputs open for the haptics calibration tone)."""
         with self._lock:
             try:
                 self._kill_worker()
@@ -241,6 +243,7 @@ class EngineBridge:
                     "zone_enabled": zone_enabled,
                     "audio_muted": audio_muted,
                     "vibration_muted": vibration_muted,
+                    "silent": bool(silent),
                 }
                 if path:
                     msg["path"] = path
@@ -407,6 +410,25 @@ class EngineBridge:
                 return
             try:
                 self._send({"cmd": "set_cutoff_hz", "value": float(value)})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def set_haptic_calibration(self, calibration: dict[str, Any]) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            try:
+                self._send({"cmd": "set_haptic_calibration", "calibration": calibration})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def haptic_test(self, channel: int | None) -> None:
+        """Calibration tone on channel 1-8 (None stops); re-send to keep it playing."""
+        with self._lock:
+            if not self._running:
+                return
+            try:
+                self._send({"cmd": "haptic_test", "channel": channel})
             except Exception:  # noqa: BLE001
                 pass
 

@@ -31,6 +31,8 @@ from live_audio import (  # noqa: E402
     is_active,
     prepare_zone_intensities,
     set_cutoff_hz,
+    set_haptic_calibration,
+    set_haptic_test,
     set_speaker_route,
     set_vibration_mode,
     set_audio_muted,
@@ -114,6 +116,7 @@ def main() -> int:
                     audio_output_index=msg.get("audio_output_index"),
                     roles_flipped=bool(msg.get("roles_flipped", False)),
                     loop=bool(msg.get("loop", True)),
+                    silent=bool(msg.get("silent", False)),
                 )
                 set_audio_muted(bool(msg.get("audio_muted", False)))
                 print(
@@ -162,6 +165,15 @@ def main() -> int:
 
             elif cmd == "set_cutoff_hz" or cmd == "set_highpass_hz":
                 set_cutoff_hz(float(msg.get("value", 200.0)))
+                _reply({"ok": True})
+
+            elif cmd == "set_haptic_calibration":
+                set_haptic_calibration(msg.get("calibration") or {})
+                _reply({"ok": True})
+
+            elif cmd == "haptic_test":
+                ch = msg.get("channel")
+                set_haptic_test(None if ch is None else int(ch))
                 _reply({"ok": True})
 
             elif cmd == "set_speaker_route":

@@ -400,6 +400,21 @@ def set_vibration(value: float) -> None:
     apply_zone_intensities(value)
 
 
+def set_haptic_calibration(cal: dict[str, Any] | None) -> None:
+    """Per-channel calibration from the UI (see audio/haptics_calibration.py)."""
+    cal = cal or {}
+    _live_engine.set_haptic_calibration(
+        master_gain_db=cal.get("master_gain_db"),
+        channel_gain_db=cal.get("channel_gain_db"),
+        channel_enabled=cal.get("channel_enabled"),
+    )
+
+
+def set_haptic_test(channel: int | None) -> None:
+    """Calibration tone on Gigaport channel 1-8 (None stops). Re-send to keep it alive."""
+    _live_engine.set_haptic_test_channel(None if channel is None else int(channel) - 1)
+
+
 def set_zone_enabled(zone: str, enabled: bool) -> None:
     key = str(zone).strip().lower()
     if key not in _zone_enabled:

@@ -33,8 +33,13 @@ COMP_RELEASE_S = 0.250
 LIMIT_CEILING = 10 ** (-3 / 20)  # outputs stay below -3 dBFS before per-channel calibration
 LIMIT_RELEASE_S = 0.300
 MIN_DECAY, MAX_DECAY = 0.997869, 1.002131  # level min/max tracker drift (from the app)
+TRACKER_STEP_S = 512 / 44100  # the tracker decays above are per 512-sample block at 44.1 kHz
 BASS_TILT_DB = 6.0  # max low-band lift / high-band cut from the Bass depth slider
 EPS = 1e-10
+# Block length the DSP is designed for (same as the Pi: 512 samples, ~11.6 ms at 44.1 kHz).
+# Callers should feed blocks of this size; time constants also follow the actual length, so a
+# shorter remainder block behaves correctly.
+HAPTIC_BLOCK = 512
 
 
 def _db(rms):
@@ -68,16 +73,27 @@ class HapticDSP:
         else:
             self.sos = [signal.butter(3, (20.0, 115.0), btype="bandpass", fs=fs, output="sos")]
             self.zi = [np.zeros((self.sos[0].shape[0], 2))]
-        t = block / fs
-        self.c_att = np.exp(-t / COMP_ATTACK_S)
-        self.c_rel = np.exp(-t / COMP_RELEASE_S)
-        self.c_lim_rel = np.exp(-t / LIMIT_RELEASE_S)
+        self._coef_n = None
+        self._set_coefs(block)
         self.gain_db = np.zeros(6)  # compressor state per band
         self.lvl_min, self.lvl_max = -60.0, -20.0
         self.prev_gain = np.zeros(6)  # start silent and ramp up
         self.lim = np.ones(n_out)  # limiter gain per output
         self.band_gain = np.ones(6)  # Bass depth tilt per source
         self.set_mix(channel_map or default_channel_map(n_out), master_gain_db)
+
+    def _set_coefs(self, n):
+        """Per-block smoothing coefficients for a block of n samples, so attack/release times and
+        the level tracker run at the same speed whatever block size the caller uses."""
+        if n == self._coef_n:
+            return
+        t = n / self.fs
+        self.c_att = np.exp(-t / COMP_ATTACK_S)
+        self.c_rel = np.exp(-t / COMP_RELEASE_S)
+        self.c_lim_rel = np.exp(-t / LIMIT_RELEASE_S)
+        steps = t / TRACKER_STEP_S
+        self.min_decay, self.max_decay = MIN_DECAY ** steps, MAX_DECAY ** steps
+        self._coef_n = n
 
     def set_bass_tilt(self, tilt):
         """tilt -1..1: +1 lifts the low band and cuts the high band by BASS_TILT_DB,
@@ -97,6 +113,7 @@ class HapticDSP:
     def process(self, x):
         """x: float array (2, N) in [-1, 1]. Returns float32 array (n_out, N)."""
         n = x.shape[1]
+        self._set_coefs(n)
         if self.mode == "smart":
             bands = []
             for i, sos in enumerate(self.sos):
@@ -132,8 +149,8 @@ class HapticDSP:
             mid_lvl = float(
                 np.clip(_db(np.sqrt(np.mean((0.5 * (x[0] + x[1])) ** 2))), -200.0, 0.0)
             )
-            self.lvl_min = mid_lvl if mid_lvl < self.lvl_min else self.lvl_min * MIN_DECAY
-            self.lvl_max = mid_lvl if mid_lvl > self.lvl_max else self.lvl_max * MAX_DECAY
+            self.lvl_min = mid_lvl if mid_lvl < self.lvl_min else self.lvl_min * self.min_decay
+            self.lvl_max = mid_lvl if mid_lvl > self.lvl_max else self.lvl_max * self.max_decay
             rng = max(self.lvl_max - self.lvl_min, 3.0)
             intensity = min(max((mid_lvl - self.lvl_min) / rng, 0.0), 1.0)
             g_int = 10 ** ((intensity * 6.0 - 3.0) / 20)
@@ -150,7 +167,7 @@ class HapticDSP:
             gain[3:] *= 10 ** (-bal / 20)
 
         gain = gain * self.band_gain
-        ramp =np.linspace(0.0, 1.0, n, endpoint=False)[None, :]
+        ramp = np.linspace(0.0, 1.0, n, endpoint=False)[None, :]
         g = self.prev_gain[:, None] + (gain - self.prev_gain)[:, None] * ramp
         self.prev_gain = gain
         out = self.mix @ (y * g)

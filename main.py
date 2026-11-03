@@ -30,6 +30,7 @@ import webview
 
 import AppWatchdog
 import UpdateManager
+from audio import haptics_calibration
 from bt_audio import BluetoothAudioService
 from battery_manager import BatteryManager
 from engine_bridge import EngineBridge
@@ -114,6 +115,13 @@ class Api:
                 "available": os.path.isfile(os.path.join(BASE_DIR, "assets", "demo.wav")),
                 "error": None,
             },
+            # Pi-style per-channel haptics calibration (audio/haptics_calibration.py).
+            # Edits apply live; only Save writes them to disk.
+            "haptic_cal": haptics_calibration.load(),
+            "haptic_cal_dirty": False,
+            "haptic_cal_error": None,
+            "calibrating": None,  # Gigaport channel 1-8 playing the calibration tone, or None
+            "calibration_busy": False,
         }
         self._bt = BluetoothAudioService()
         self._media = MediaSessionService()
@@ -133,6 +141,8 @@ class Api:
             "artwork": "assets/artwork.svg",
         }
         self._live_started_at: float | None = None
+        self._cal_started_engine = False  # calibration opened the outputs itself (silent)
+        self._cal_keepalive_at = 0.0
         self._bt_autostart_at: float = 0.0
         self._last_paired_refresh = 0.0
         self._paired_refresh_busy = False
@@ -173,6 +183,7 @@ class Api:
 
     # ------------------------------------------------------------------ state --
     def get_state(self) -> dict[str, Any]:
+        self._keep_calibration_tone_alive()
         self._refresh_bluetooth_link()
         self._refresh_media()
         with self._lock:
@@ -444,6 +455,15 @@ class Api:
         snap["update"] = self._updater.snapshot()
         snap["update_notice"] = self._update_notice
         snap["wifi"] = self._wifi.snapshot()
+        cal = self.state["haptic_cal"]
+        snap["haptic_cal"] = {
+            "master_gain_db": cal["master_gain_db"],
+            "channel_gain_db": list(cal["channel_gain_db"]),
+            "channel_enabled": list(cal["channel_enabled"]),
+            "channel_labels": [list(x) for x in cal["channel_labels"]],
+            "parts": list(haptics_calibration.BODY_PARTS),
+            "sides": list(haptics_calibration.SIDES),
+        }
         return snap
 
     # -------------------------------------------------------- Start / Stop Live --
@@ -495,6 +515,9 @@ class Api:
                 audio_muted=bool(self.state.get("audio_muted")),
                 vibration_muted=bool(self.state.get("vibration_muted")),
             )
+            if result.get("ok"):
+                self._cal_started_engine = False
+                self._push_haptic_cal()
             with self._lock:
                 self.state["playing"] = bool(result.get("ok"))
                 self.state["capture_name"] = result.get("capture")
@@ -601,6 +624,9 @@ class Api:
                 audio_muted=bool(self.state.get("audio_muted")),
                 vibration_muted=bool(self.state.get("vibration_muted")),
             )
+            if result.get("ok"):
+                self._cal_started_engine = False
+                self._push_haptic_cal()
             with self._lock:
                 ok = bool(result.get("ok"))
                 self.state["playing"] = ok
@@ -784,6 +810,158 @@ class Api:
         self._engine.set_vibration_mode(mode)
         with self._lock:
             return self._snapshot()
+
+    # ------------------------------------------------------ haptics calibration --
+    def _push_haptic_cal(self) -> None:
+        with self._lock:
+            cal = haptics_calibration.normalize(self.state["haptic_cal"])
+        self._engine.set_haptic_calibration(cal)
+
+    def set_haptic_master(self, gain_db: float) -> dict[str, Any]:
+        """Overall haptic level in dB (applied in the DSP before its limiter)."""
+        with self._lock:
+            cal = dict(self.state["haptic_cal"])
+            cal["master_gain_db"] = gain_db
+            self.state["haptic_cal"] = haptics_calibration.normalize(cal)
+            self.state["haptic_cal_dirty"] = True
+        self._push_haptic_cal()
+        with self._lock:
+            return self._snapshot()
+
+    def set_haptic_channel(
+        self,
+        channel: int,
+        gain_db: float | None = None,
+        enabled: bool | None = None,
+        part: str | None = None,
+        side: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit one Gigaport channel (1-8): trim in dB, on/off, body position."""
+        try:
+            i = int(channel) - 1
+        except (TypeError, ValueError):
+            i = -1
+        with self._lock:
+            if 0 <= i < haptics_calibration.N_CHANNELS:
+                cal = haptics_calibration.normalize(self.state["haptic_cal"])
+                if gain_db is not None:
+                    cal["channel_gain_db"][i] = gain_db
+                if enabled is not None:
+                    cal["channel_enabled"][i] = bool(enabled)
+                part_now, side_now = cal["channel_labels"][i]
+                cal["channel_labels"][i] = [part or part_now, side or side_now]
+                self.state["haptic_cal"] = haptics_calibration.normalize(cal)
+                self.state["haptic_cal_dirty"] = True
+        self._push_haptic_cal()
+        with self._lock:
+            return self._snapshot()
+
+    def save_haptic_calibration(self) -> dict[str, Any]:
+        with self._lock:
+            cal = haptics_calibration.normalize(self.state["haptic_cal"])
+            try:
+                path = haptics_calibration.save(cal)
+                self.state["haptic_cal_dirty"] = False
+                self.state["haptic_cal_error"] = None
+                print(f"[app] haptics calibration saved: {path}")
+            except OSError as exc:
+                self.state["haptic_cal_error"] = f"Could not save calibration: {exc}"
+            return self._snapshot()
+
+    def revert_haptic_calibration(self) -> dict[str, Any]:
+        with self._lock:
+            self.state["haptic_cal"] = haptics_calibration.load()
+            self.state["haptic_cal_dirty"] = False
+            self.state["haptic_cal_error"] = None
+        self._push_haptic_cal()
+        with self._lock:
+            return self._snapshot()
+
+    def haptic_test(self, channel: int | None = None) -> dict[str, Any]:
+        """Calibration tone on Gigaport channel 1-8; None stops it.
+
+        If nothing is playing, the Gigaport outputs are opened with silence (same path as
+        Demo, nothing in the headphones) and closed again when calibration ends. If Live or
+        Demo is playing, the tone replaces the vibration while it runs.
+        """
+        ch: int | None
+        try:
+            ch = int(channel) if channel is not None else None
+        except (TypeError, ValueError):
+            ch = None
+        if ch is not None and not 1 <= ch <= haptics_calibration.N_CHANNELS:
+            ch = None
+
+        if ch is None:
+            self._engine.haptic_test(None)
+            stop_engine = self._cal_started_engine
+            self._cal_started_engine = False
+            if stop_engine:
+                try:
+                    self._engine.stop_live()
+                except Exception:  # noqa: BLE001
+                    pass
+            with self._lock:
+                self.state["calibrating"] = None
+                if stop_engine:
+                    self.state["live_mode"] = None
+                return self._snapshot()
+
+        with self._lock:
+            busy = self.state["play_busy"] or self.state["calibration_busy"]
+            playing = bool(self.state["playing"])
+        if busy:
+            with self._lock:
+                return self._snapshot()
+
+        if not playing and not self._engine.running:
+            with self._lock:
+                self.state["calibration_busy"] = True
+            try:
+                result = self._engine.start_demo(
+                    volume=0.0,
+                    vibration=self.state["vibration"],
+                    cutoff_hz=self.state["cutoff_hz"],
+                    vibration_mode=self.state.get("vibration_mode", "haptics"),
+                    vibration_output_index=self.state.get("vibration_output_index"),
+                    audio_output_index=self.state.get("audio_output_index"),
+                    roles_flipped=bool(self.state.get("gigaport_roles_flipped")),
+                    zone_enabled=dict(self.state.get("zone_enabled") or {}),
+                    audio_muted=True,
+                    vibration_muted=False,
+                    silent=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = {"ok": False, "error": str(exc)}
+            with self._lock:
+                self.state["calibration_busy"] = False
+                if not result.get("ok"):
+                    self.state["haptic_cal_error"] = (
+                        "Could not open the Gigaport for calibration: "
+                        f"{result.get('error') or 'unknown error'}"
+                    )
+                    self.state["calibrating"] = None
+                    return self._snapshot()
+                self.state["haptic_cal_error"] = None
+                self.state["live_mode"] = "calibration"
+            self._cal_started_engine = True
+            self._push_haptic_cal()
+
+        self._engine.haptic_test(ch)
+        self._cal_keepalive_at = time.monotonic()
+        with self._lock:
+            self.state["calibrating"] = ch
+            return self._snapshot()
+
+    def _keep_calibration_tone_alive(self) -> None:
+        """The engine stops the tone ~10 s after the last request (e.g. if the UI died);
+        renew it every few seconds while the calibration sheet is open."""
+        with self._lock:
+            ch = self.state.get("calibrating")
+        if ch is None or time.monotonic() - self._cal_keepalive_at < 3.0:
+            return
+        self._cal_keepalive_at = time.monotonic()
+        self._engine.haptic_test(ch)
 
     def set_output_devices(
         self,

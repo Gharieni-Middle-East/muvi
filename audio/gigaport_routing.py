@@ -97,6 +97,31 @@ def build_vibration_only_block(
     return out
 
 
+def build_output_block_haptics8(
+    audio: np.ndarray,
+    vib8: np.ndarray,
+    *,
+    speaker_route: SpeakerRoute = "headphones",
+) -> np.ndarray:
+    """Dual ASIO4ALL (16 ch) block for haptics mode: the 8 HapticDSP channels go to
+    Gigaport 1 ch 1-8 unchanged (left/right kept), audio to Gigaport 2 like build_output_block.
+
+    audio: (n, 2) left/right at output sample rate
+    vib8:  (n, 8) HapticDSP channels (1/2 head, 3/4 upper, 5/6 mid back, 7/8 legs; L/R)
+    """
+    n = min(len(audio), len(vib8))
+    out = np.zeros((n, DUAL_GIGAPORT_CHANNELS), dtype=np.float32)
+    if n <= 0:
+        return out
+    out[:, 0:8] = np.clip(vib8[:n, :8], -1.0, 1.0)
+    audio = np.clip(audio[:n], -1.0, 1.0).astype(np.float32, copy=False)
+    if speaker_route == "secondary":
+        out[:, 10:12] = audio
+    else:
+        out[:, 8:10] = audio
+    return out
+
+
 def build_output_block(
     audio: np.ndarray,
     vib: np.ndarray,

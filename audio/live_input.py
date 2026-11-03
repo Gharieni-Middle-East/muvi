@@ -14,7 +14,12 @@ import numpy as np
 import sounddevice as sd
 from scipy.signal import butter, sosfilt, sosfilt_zi
 
-from audio.audio_utils import TARGET_SR, ensure_stereo, fit_frames, resample_if_needed
+from audio.audio_utils import (
+    TARGET_SR,
+    StreamResampler,
+    ensure_stereo,
+    fit_frames,
+)
 from audio.soundcard_loopback import (
     SoundcardLoopbackThread,
     get_default_playback_speaker_id,
@@ -26,10 +31,12 @@ from audio.gigaport_routing import (
     SpeakerRoute,
     VibrationMode,
     build_output_block,
+    build_output_block_haptics8,
     build_vibration_only_block,
     output_channels_for_layout,
 )
-from audio.haptics_dsp import HapticDSP
+from audio import haptics_calibration
+from audio.haptics_dsp import HAPTIC_BLOCK, HapticDSP, default_channel_map, soft_clip
 from audio.output_devices import wasapi_output_extra
 from audio.vibration_presets import (
     SATORI_OUTPUT_CHANNELS,
@@ -58,6 +65,11 @@ DEFAULT_VIBE_SYNC_MS = 0.0
 BASELINE_DELAY_MS = 150.0
 # Hard ceiling on total vibration delay.
 MAX_DELAY_MS = 4000.0
+# Calibration test tone (same as the Pi): pulsed 40 Hz, 0.8 s on / 0.4 s off, at -12 dBFS before
+# the channel's calibration trim. Stops on its own if the UI stops renewing it.
+HAPTIC_TEST_FREQ_HZ = 40.0
+HAPTIC_TEST_LEVEL_DB = -12.0
+HAPTIC_TEST_TIMEOUT_S = 10.0
 
 
 def _looks_like_bluetooth(name: str) -> bool:
@@ -744,6 +756,20 @@ class LiveAudioEngine:
         self.speaker_route: SpeakerRoute = "headphones"
         self.vibration_mode: VibrationMode = "haptics"
         self._haptic_dsp: HapticDSP | None = None
+        # Pi-style calibration (see audio/haptics_calibration.py); pushed by the UI process.
+        cal = haptics_calibration.load()
+        self.haptic_master_gain_db = float(cal["master_gain_db"])
+        self.haptic_channel_gain_db = [float(g) for g in cal["channel_gain_db"]]
+        self.haptic_channel_enabled = [bool(e) for e in cal["channel_enabled"]]
+        self._haptic_prev_gain = np.zeros(8, dtype=np.float32)
+        self._haptic_in_fifo = np.zeros((0, 2), dtype=np.float32)
+        self._haptic_out_fifo = np.zeros((0, 8), dtype=np.float32)
+        # Calibration test tone: 0-based channel or None; auto-stops at the deadline.
+        self.haptic_test_channel: int | None = None
+        self._haptic_test_deadline = 0.0
+        self._haptic_tone_t = 0
+        # Continuous resamplers, one per stream (see StreamResampler); reset on every start.
+        self._resamplers: dict[str, StreamResampler] = {}
         self.output_channel_count = SATORI_OUTPUT_CHANNELS
         self.vibration_output_channels: int | None = None
         self.audio_output_channel_count = 4
@@ -815,14 +841,84 @@ class LiveAudioEngine:
     def _reset_haptic_dsp(self) -> None:
         self._haptic_dsp = None
 
+    def _rs(self, name: str, data: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+        """Resample one continuous stream (`name`) with state kept between blocks.
+
+        Replaces per-block resample_if_needed on the live paths: that rang at every block edge
+        (a click/rattle on the transducers every block) and added a sample per block, so the
+        output ring slowly overflowed and dropped a block."""
+        data = np.asarray(data, dtype=np.float32)
+        if int(src_sr) == int(dst_sr):
+            return data
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+        ch = data.shape[1]
+        rs = self._resamplers.get(name)
+        if rs is None or rs.src_sr != int(src_sr) or rs.dst_sr != int(dst_sr) or rs.channels != ch:
+            rs = StreamResampler(int(src_sr), int(dst_sr), ch)
+            self._resamplers[name] = rs
+        return rs.process(data)
+
+    def set_haptic_calibration(
+        self,
+        master_gain_db: float | None = None,
+        channel_gain_db: list[float] | None = None,
+        channel_enabled: list[bool] | None = None,
+    ) -> None:
+        cal = haptics_calibration.normalize({
+            "master_gain_db": self.haptic_master_gain_db if master_gain_db is None else master_gain_db,
+            "channel_gain_db": self.haptic_channel_gain_db if channel_gain_db is None else channel_gain_db,
+            "channel_enabled": self.haptic_channel_enabled if channel_enabled is None else channel_enabled,
+        })
+        with self.lock:
+            master_changed = cal["master_gain_db"] != self.haptic_master_gain_db
+            self.haptic_master_gain_db = float(cal["master_gain_db"])
+            self.haptic_channel_gain_db = [float(g) for g in cal["channel_gain_db"]]
+            self.haptic_channel_enabled = [bool(e) for e in cal["channel_enabled"]]
+        dsp = self._haptic_dsp
+        if master_changed and dsp is not None:
+            dsp.set_mix(default_channel_map(8), self.haptic_master_gain_db)
+
+    def set_haptic_test_channel(self, channel: int | None) -> None:
+        """Play the calibration tone on one channel (0-based), or None to stop. Calling it again
+        renews the auto-stop timer (the UI keeps renewing while the calibration sheet is open)."""
+        with self.lock:
+            if channel is None or not (0 <= int(channel) < 8):
+                self.haptic_test_channel = None
+                return
+            if self.haptic_test_channel != int(channel):
+                self._haptic_tone_t = 0
+            self.haptic_test_channel = int(channel)
+            self._haptic_test_deadline = time.monotonic() + HAPTIC_TEST_TIMEOUT_S
+
+    def _active_test_channel(self) -> int | None:
+        with self.lock:
+            ch = self.haptic_test_channel
+            if ch is not None and time.monotonic() > self._haptic_test_deadline:
+                self.haptic_test_channel = None
+                ch = None
+        return ch
+
+    def _haptic_test_tone(self, ch: int, frames: int) -> np.ndarray:
+        """Pulsed sine on one channel (0.8 s on / 0.4 s off): easy to recognise by feel."""
+        t = (self._haptic_tone_t + np.arange(frames)) / PROCESSING_SR
+        self._haptic_tone_t += frames
+        ph = t % 1.2
+        env = np.clip(np.minimum(ph / 0.03, (0.8 - ph) / 0.03), 0.0, 1.0)
+        out = np.zeros((frames, 8), dtype=np.float32)
+        out[:, ch] = (10 ** (HAPTIC_TEST_LEVEL_DB / 20)) * env * np.sin(2 * np.pi * HAPTIC_TEST_FREQ_HZ * t)
+        return out
+
     def _ensure_haptic_dsp(self) -> HapticDSP:
         dsp = self._haptic_dsp
         if dsp is None:
             dsp = HapticDSP(
                 fs=PROCESSING_SR,
                 mode="smart",
+                channel_map=default_channel_map(8),
+                master_gain_db=self.haptic_master_gain_db,
                 n_out=8,
-                block=BLOCKSIZE,
+                block=HAPTIC_BLOCK,
             )
             dsp.set_bass_tilt(self._haptic_bass_tilt())
             self._haptic_dsp = dsp
@@ -858,9 +954,9 @@ class LiveAudioEngine:
             capture = np.repeat(capture, 2, axis=1)
         stereo = ensure_stereo(capture)
         if self.input_sample_rate != PROCESSING_SR:
-            stereo = resample_if_needed(stereo, self.input_sample_rate, PROCESSING_SR)
+            stereo = self._rs("pt_in", stereo, self.input_sample_rate, PROCESSING_SR)
         if self.output_sample_rate != PROCESSING_SR:
-            stereo = resample_if_needed(stereo, PROCESSING_SR, self.output_sample_rate)
+            stereo = self._rs("pt_out", stereo, PROCESSING_SR, self.output_sample_rate)
         return (stereo * self._effective_audio_gain()).astype(np.float32)
 
     def _render_haptics_only(
@@ -869,7 +965,13 @@ class LiveAudioEngine:
         *,
         already_processing_sr: bool = False,
     ) -> np.ndarray:
-        """Quake HapticDSP → 8 Gigaport channels with per-zone intensity applied."""
+        """Quake HapticDSP → 8 Gigaport channels, same chain as the Pi muvi-haptics app.
+
+        DSP in exact 512-sample blocks (Pi block size) → calibration (per-channel trim, on/off;
+        overall level is inside the DSP before its limiter) × vibration slider / zone switches →
+        soft clip → continuous resample to the output rate. Returns as many frames as it got
+        (at the output rate), so it stays aligned with the audio path.
+        """
         if not already_processing_sr:
             capture = self._stereo_capture_block(capture)
         else:
@@ -879,25 +981,48 @@ class LiveAudioEngine:
             return np.zeros((0, 8), dtype=np.float32)
 
         dsp = self._ensure_haptic_dsp()
-        # HapticDSP expects (2, N)
-        out = dsp.process(capture.T)  # (8, N)
-        vib = out.T.astype(np.float32, copy=False)  # (N, 8)
+        # Exact 512-sample DSP blocks via a FIFO (output FIFO is primed with one block, so it
+        # always holds enough: constant 11.6 ms latency, absorbed by the vibe sync delay).
+        self._haptic_in_fifo = np.concatenate([self._haptic_in_fifo, capture], axis=0)
+        n_full = len(self._haptic_in_fifo) // HAPTIC_BLOCK * HAPTIC_BLOCK
+        if n_full:
+            blocks = [
+                dsp.process(self._haptic_in_fifo[i:i + HAPTIC_BLOCK].T).T
+                for i in range(0, n_full, HAPTIC_BLOCK)
+            ]
+            self._haptic_out_fifo = np.concatenate([self._haptic_out_fifo, *blocks], axis=0)
+            self._haptic_in_fifo = self._haptic_in_fifo[n_full:]
+        vib = self._haptic_out_fifo[:frames]
+        self._haptic_out_fifo = self._haptic_out_fifo[frames:]
+        if len(vib) < frames:  # cannot happen with the primed FIFO; keep lengths aligned anyway
+            vib = np.concatenate([vib, np.zeros((frames - len(vib), 8), dtype=np.float32)], axis=0)
 
-        # Zone gains map onto channel pairs: head, upper, mid, legs.
-        gains = (
-            self.intensity_head,
-            self.intensity_upper,
-            self.intensity_mid,
-            self.intensity_legs,
-        )
-        for pair_idx, g in enumerate(gains):
-            lo = pair_idx * 2
-            hi = lo + 2
-            if g != 1.0:
-                vib[:, lo:hi] *= float(g)
+        # Per-channel gain: calibration trim × on/off × vibration slider/zone switch (pairs:
+        # head, upper, mid, legs). Ramped across the block so changes never click.
+        zone = (self.intensity_head, self.intensity_upper, self.intensity_mid, self.intensity_legs)
+        with self.lock:
+            trims = [10 ** (g / 20) for g in self.haptic_channel_gain_db]
+            enabled = list(self.haptic_channel_enabled)
+        test_ch = self._active_test_channel()
+        if test_ch is not None:
+            # Calibration: only the tested channel, at its trim (even if switched off or the
+            # slider is low, so it can always be found and set).
+            vib = self._haptic_test_tone(test_ch, frames)
+            target = np.zeros(8, dtype=np.float32)
+            target[test_ch] = trims[test_ch]
+        else:
+            target = np.array(
+                [trims[c] * (1.0 if enabled[c] else 0.0) * float(zone[c // 2]) for c in range(8)],
+                dtype=np.float32,
+            )
+        ramp = np.linspace(0.0, 1.0, frames, endpoint=False, dtype=np.float32)[:, None]
+        vib = vib * (self._haptic_prev_gain[None, :] + (target - self._haptic_prev_gain)[None, :] * ramp)
+        self._haptic_prev_gain = target
+        # Soft clip, never hard: trims up to +12 dB must not square off the waveform.
+        vib = soft_clip(vib.astype(np.float32, copy=False), 0.99)
 
         if self.output_sample_rate != PROCESSING_SR:
-            vib = resample_if_needed(vib, PROCESSING_SR, self.output_sample_rate)
+            vib = self._rs("vib8", vib, PROCESSING_SR, self.output_sample_rate)
 
         head = vib[:, 0:2]
         upper = vib[:, 2:4]
@@ -917,7 +1042,7 @@ class LiveAudioEngine:
             self.stats["bass_energy"] = bass_energy
             self.stats["generated_freq_hz"] = 0.0
 
-        return np.clip(vib, -1.0, 1.0)
+        return vib.astype(np.float32, copy=False)
 
     @staticmethod
     def _haptics_to_zones(vib8: np.ndarray) -> np.ndarray:
@@ -958,7 +1083,7 @@ class LiveAudioEngine:
         vib[:, 3] = mid
 
         if self.output_sample_rate != PROCESSING_SR:
-            vib = resample_if_needed(vib, PROCESSING_SR, self.output_sample_rate)
+            vib = self._rs("vib4", vib, PROCESSING_SR, self.output_sample_rate)
 
         with self.lock:
             self.stats["rms_legs"] = result["rms_legs"]
@@ -1007,6 +1132,9 @@ class LiveAudioEngine:
         return int(round(self._capture_lag_ms(sync_ms) * PROCESSING_SR / 1000.0))
 
     def _reset_capture_ring(self) -> None:
+        self._resamplers = {}
+        self._haptic_in_fifo = np.zeros((0, 2), dtype=np.float32)
+        self._haptic_out_fifo = np.zeros((HAPTIC_BLOCK, 8), dtype=np.float32)  # fixed 11.6 ms latency
         self._capture_ring = np.zeros((0, 2), dtype=np.float32)
         self._capture_read_idx = 0
         self._src_ring = np.zeros((0, 2), dtype=np.float32)
@@ -1022,7 +1150,7 @@ class LiveAudioEngine:
             capture = np.repeat(capture, 2, axis=1)
         stereo = ensure_stereo(capture).astype(np.float32, copy=False)
         if self.input_sample_rate != PROCESSING_SR:
-            stereo = resample_if_needed(stereo, self.input_sample_rate, PROCESSING_SR)
+            stereo = self._rs("cap_in", stereo, self.input_sample_rate, PROCESSING_SR)
         return stereo
 
     def _push_vibration_block(self, vib: np.ndarray) -> None:
@@ -1075,7 +1203,8 @@ class LiveAudioEngine:
         while (len(self._capture_ring) - self._capture_read_idx) - chunk_len >= delay:
             chunk = self._capture_ring[self._capture_read_idx : self._capture_read_idx + chunk_len]
             self._capture_read_idx += chunk_len
-            if self.vibration_mode == "haptics":
+            if self.vibration_mode == "haptics" or self._active_test_channel() is not None:
+                # Overlay/APC mode has only the 4 zone outputs (ch3-6), so L/R are averaged.
                 vib8 = self._render_haptics_only(chunk, already_processing_sr=True)
                 vib = self._haptics_to_zones(vib8)
             else:
@@ -1122,8 +1251,8 @@ class LiveAudioEngine:
         vib_ps[:, 3] = fit_frames(result["mid"], m)
 
         if self.output_sample_rate != PROCESSING_SR:
-            audio_os = resample_if_needed(cap, PROCESSING_SR, self.output_sample_rate)
-            vib_os = resample_if_needed(vib_ps, PROCESSING_SR, self.output_sample_rate)
+            audio_os = self._rs("pair_audio", cap, PROCESSING_SR, self.output_sample_rate)
+            vib_os = self._rs("pair_vib", vib_ps, PROCESSING_SR, self.output_sample_rate)
         else:
             audio_os = cap
             vib_os = vib_ps
@@ -1177,14 +1306,14 @@ class LiveAudioEngine:
         while (len(self._capture_ring) - self._capture_read_idx) - chunk_len >= delay:
             chunk = self._capture_ring[self._capture_read_idx : self._capture_read_idx + chunk_len]
             self._capture_read_idx += chunk_len
-            if self.vibration_mode == "haptics":
+            if self.vibration_mode == "haptics" or self._active_test_channel() is not None:
                 vib8 = self._render_haptics_only(chunk, already_processing_sr=True)
             else:
                 vib8 = None
                 vib = self._render_vibration_only(chunk, already_processing_sr=True)
             audio = chunk.astype(np.float32, copy=False) * self._effective_audio_gain()
             if self.output_sample_rate != PROCESSING_SR:
-                audio = resample_if_needed(audio, PROCESSING_SR, self.output_sample_rate)
+                audio = self._rs("audio", audio, PROCESSING_SR, self.output_sample_rate)
             if self.output_layout in ("dual_native", "vibration_only"):
                 vib_ch = int(
                     self.vibration_output_channels
@@ -1216,8 +1345,18 @@ class LiveAudioEngine:
                         audio_out[:, 0:2] = np.clip(audio[:n], -1.0, 1.0)
                     with self.lock:
                         self._audio_output_ring.append(audio_out)
+            elif vib8 is not None and self.output_layout == "dual_asio4all":
+                # ch1-8 = the 8 haptic channels as-is (keeps left/right), audio on ch9-12.
+                n = min(len(audio), len(vib8))
+                block = build_output_block_haptics8(
+                    audio[:n],
+                    vib8[:n],
+                    speaker_route=self.speaker_route,
+                )
+                self._push_vibration_block(block)
             else:
                 if vib8 is not None:
+                    # "single" layout has only 4 vibration outputs (ch3-6): L/R are averaged.
                     vib = self._haptics_to_zones(vib8)
                 n = min(len(audio), len(vib))
                 block = build_output_block(

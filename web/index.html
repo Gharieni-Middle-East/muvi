@@ -416,6 +416,29 @@
             </button>
           </div>
         </div>
+        <div class="cal-card" id="hapticsCalCard">
+          <div class="cal-card-head">
+            <div class="update-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 12h2l2-6 4 12 3-9 2 3h3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+            <div class="update-text">
+              <strong>Haptics calibration</strong>
+              <span class="update-status">Check where each transducer is and set its level. Applies to Haptics mode.</span>
+            </div>
+            <button type="button" class="btn-primary" id="calStartBtn">Start calibration</button>
+          </div>
+          <div class="cal-master">
+            <div class="slider-head"><span>Overall haptic level</span><span class="slider-val" id="calMasterVal">0.0 dB</span></div>
+            <input type="range" id="calMaster" min="-20" max="20" step="0.5" value="0" class="range" aria-label="Overall haptic level" />
+          </div>
+          <div class="cal-list" id="calList"></div>
+          <div class="cal-footer">
+            <span class="cal-save-state" id="calSaveState">All changes saved</span>
+            <span class="cal-error" id="calError" hidden></span>
+            <button type="button" class="btn-ghost" id="calRevertBtn">Undo</button>
+            <button type="button" class="btn-primary" id="calSaveBtn">Save</button>
+          </div>
+        </div>
         <ul class="hw-detail-list" id="hwDetailList" aria-label="Hardware status">
           <li class="hw-detail-row bad" id="hwRowGigaport">
             <span class="hw-detail-icon" aria-hidden="true">
@@ -471,8 +494,74 @@
     </div>
   </div>
 
+  <!-- Haptics calibration: one transducer at a time -->
+  <div class="modal" id="calSheet" hidden>
+    <div class="modal-card cal-sheet" role="dialog" aria-modal="true" aria-labelledby="calWhere">
+      <div class="cal-sheet-top">
+        <span class="cal-step" id="calStep">Channel 1 of 8</span>
+        <button type="button" class="btn-ghost sm" id="calExitBtn">Exit</button>
+      </div>
+      <div class="cal-progress"><div id="calProgress"></div></div>
+
+      <div id="calStepBody">
+        <div class="cal-sheet-main">
+          <div>
+            <h2 class="cal-where" id="calWhere">Head</h2>
+            <div class="cal-side" id="calSide">LEFT side</div>
+            <div class="cal-pulse" id="calPulse"><i></i><span id="calPulseText">Vibrating now on channel 1</span></div>
+            <p class="cal-instruction" id="calInstruction"></p>
+          </div>
+          <svg class="cal-body" viewBox="0 0 120 230" aria-hidden="true">
+            <!-- seated figure seen from behind: the person's left is on the left -->
+            <circle class="part" id="cb-Head" cx="60" cy="18" r="14"/>
+            <rect class="part" id="cb-Neck" x="52" y="31" width="16" height="7" rx="3"/>
+            <rect class="part" id="cb-Shoulders" x="22" y="38" width="76" height="14" rx="7"/>
+            <rect class="part" id="cb-Upper back" x="30" y="54" width="60" height="26" rx="6"/>
+            <rect class="part" id="cb-Mid back" x="30" y="82" width="60" height="26" rx="6"/>
+            <rect class="part" id="cb-Lower back" x="30" y="110" width="60" height="26" rx="6"/>
+            <rect class="part" id="cb-Seat" x="26" y="138" width="68" height="20" rx="8"/>
+            <rect class="part" id="cb-Thighs" x="30" y="160" width="60" height="22" rx="8"/>
+            <rect class="part" id="cb-Calves" x="34" y="184" width="52" height="22" rx="8"/>
+            <rect class="part" id="cb-Feet" x="34" y="208" width="52" height="14" rx="6"/>
+            <rect class="part" id="cb-ArmL" x="6" y="56" width="18" height="70" rx="8"/>
+            <rect class="part" id="cb-ArmR" x="96" y="56" width="18" height="70" rx="8"/>
+            <rect class="hit" id="cbHit" rx="6" x="0" y="0" width="0" height="0"/>
+            <line x1="60" y1="38" x2="60" y2="222" stroke="#17171e" stroke-width="3"/>
+            <text x="16" y="150" class="cal-l" text-anchor="middle">L</text>
+            <text x="104" y="150" class="cal-r" text-anchor="middle">R</text>
+          </svg>
+        </div>
+
+        <div class="cal-db" id="calDb">0.0 dB</div>
+        <input type="range" id="calSlider" min="-30" max="12" step="0.5" value="0" class="range" aria-label="Intensity for this channel" />
+        <div class="cal-scale"><span>weaker</span><span>stronger</span></div>
+
+        <details class="cal-fix">
+          <summary>Felt it somewhere else? Correct the position</summary>
+          <div class="cal-fix-row">
+            <select id="calPartSel" aria-label="Body part"></select>
+            <select id="calSideSel" aria-label="Side"></select>
+          </div>
+        </details>
+        <label class="cal-use"><span>Use this channel</span><input type="checkbox" id="calEnabled" /></label>
+      </div>
+
+      <div id="calDoneBody" hidden>
+        <h2 class="cal-where">All 8 channels checked</h2>
+        <p class="modal-text">Review, then save. Saved settings are used for music and kept after updates and restarts.</p>
+        <div class="cal-summary" id="calSummary"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" id="calPrevBtn">Back</button>
+        <button type="button" class="btn-primary" id="calNextBtn">Next channel</button>
+      </div>
+    </div>
+  </div>
+
   <script src="constants/constants.js"></script>
   <script src="app.js"></script>
+  <script src="calibration.js"></script>
   <script src="update_wifi.js"></script>
 </body>
 </html>

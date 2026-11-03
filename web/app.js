@@ -40,7 +40,20 @@ const MockApi = (() => {
     },
     devices: [],
     nearby_devices: [],
+    haptic_cal: {
+      master_gain_db: 0, channel_gain_db: [0, 0, 0, 0, 0, 0, 0, 0],
+      channel_enabled: [true, true, true, true, true, true, true, true],
+      channel_labels: [["Head", "Left"], ["Head", "Right"], ["Upper back", "Left"], ["Upper back", "Right"],
+        ["Mid back", "Left"], ["Mid back", "Right"], ["Legs", "Left"], ["Legs", "Right"]],
+      parts: ["Head", "Neck", "Shoulders", "Upper back", "Mid back", "Lower back", "Seat", "Legs", "Thighs", "Calves", "Feet", "Arms"],
+      sides: ["Left", "Right", "Center"],
+    },
+    haptic_cal_dirty: false,
+    haptic_cal_error: null,
+    calibrating: null,
+    calibration_busy: false,
   };
+  let savedCal = JSON.parse(JSON.stringify(state.haptic_cal));
   let last = performance.now();
   const snap = () => {
     const now = performance.now();
@@ -224,6 +237,35 @@ const MockApi = (() => {
     },
     clear_bluetooth_alert: async () => {
       state.bluetooth.alert = null;
+      return snap();
+    },
+    set_haptic_master: async (db) => {
+      state.haptic_cal.master_gain_db = Math.max(-20, Math.min(20, Number(db)));
+      state.haptic_cal_dirty = true;
+      return snap();
+    },
+    set_haptic_channel: async (ch, gain_db = null, enabled = null, part = null, side = null) => {
+      const i = Number(ch) - 1;
+      if (i < 0 || i > 7) return snap();
+      const c = state.haptic_cal;
+      if (gain_db !== null) c.channel_gain_db[i] = Math.max(-30, Math.min(12, Number(gain_db)));
+      if (enabled !== null) c.channel_enabled[i] = Boolean(enabled);
+      c.channel_labels[i] = [part || c.channel_labels[i][0], side || c.channel_labels[i][1]];
+      state.haptic_cal_dirty = true;
+      return snap();
+    },
+    save_haptic_calibration: async () => {
+      savedCal = JSON.parse(JSON.stringify(state.haptic_cal));
+      state.haptic_cal_dirty = false;
+      return snap();
+    },
+    revert_haptic_calibration: async () => {
+      state.haptic_cal = JSON.parse(JSON.stringify(savedCal));
+      state.haptic_cal_dirty = false;
+      return snap();
+    },
+    haptic_test: async (ch = null) => {
+      state.calibrating = ch === null ? null : Number(ch);
       return snap();
     },
   };
@@ -774,6 +816,7 @@ function renderHardwareStatus(hw, playing = false, state = null) {
 function render(s) {
   if (!s) return;
   lastState = s;
+  if (typeof renderCalibration === "function") renderCalibration(s);
   const liveOn = isLivePlaying(s);
   const demoOn = isDemoPlaying(s);
   renderHardwareStatus(s.hardware, liveOn || demoOn, s);

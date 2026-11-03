@@ -6,3 +6,6 @@ build/
 dist/
 release/
 .DS_Store
+
+# per-tablet haptics calibration (saved by the app)
+haptics_calibration.json

@@ -41,6 +41,16 @@ Console:
 - Starting Demo stops Live (and vice versa) so ASIO isn’t contested
 
 
+## 4) Haptics calibration (Settings)
+Same model as the Raspberry Pi app: per-transducer level (dB), on/off and body position, plus an
+overall haptic level. **Start calibration** pulses one Gigaport channel at a time (40 Hz,
+0.8 s on / 0.4 s off) and shows where it should be felt; correct the position if it's elsewhere.
+- Works with nothing playing (opens the Gigaport with silence) or over Live/Demo.
+- Edits apply live; **Save** keeps them (Undo returns to the last save).
+- Stored outside the app folder so updates keep it: `C:\kiosk_launcher\haptics_calibration.json`
+  (source runs: `haptics_calibration.json` in the project folder).
+- Applies to **Haptics** mode. The Vibration slider and zone switches still work on top of it.
+
 **Easiest fix for WinRT errors on the tablet:** double-click `install_winrt.bat` in `D:\muvi_new`, wait for `SUCCESS`, then:
 
 ```bat
