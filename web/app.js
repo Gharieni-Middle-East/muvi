@@ -6,7 +6,7 @@ const el = (id) => document.getElementById(id);
 // --------------------------------------------------------------- API bridge --
 const MockApi = (() => {
   const state = {
-    playing: false, play_busy: false, volume: 0.70, vibration: 0.27, highpass_hz: 200, cutoff_hz: 200, position: 0,
+    playing: false, play_busy: false, volume: 0.70, vibration: 0.28, highpass_hz: 200, cutoff_hz: 200, position: 0,
     speaker_route: "headphones", vibration_mode: "haptics", output_layout: null,
     live_mode: null,
     device_name: { name: "DESKTOP-7Q2K1LM", next_name: "DESKTOP-7Q2K1LM", target: "MuVi", ok: false, restart_needed: false, supported: true },
@@ -821,6 +821,10 @@ function renderHardwareStatus(hw, playing = false, state = null) {
   renderSettingsStatus(hw, state || lastState);
 }
 
+// Volume / Vibration / Bass depth snap to 2 % steps (step="2" in index.html).
+const SLIDER_STEP = 2;
+const snapPct = (pct) => Math.max(0, Math.min(100, Math.round(Number(pct) / SLIDER_STEP) * SLIDER_STEP));
+
 // Bronze fill left of the slider thumb (styles.css reads --pct).
 function syncRangeFill(input) {
   const min = Number(input.min || 0);
@@ -992,12 +996,12 @@ function render(s) {
   prevBtn.classList.toggle("disabled", prevBtn.disabled);
   nextBtn.classList.toggle("disabled", nextBtn.disabled);
 
-  el("volume").value = Math.round(s.volume * 100);
-  el("volVal").textContent = `${Math.round(s.volume * 100)}%`;
-  el("vibration").value = Math.round(s.vibration * 100);
-  el("vibVal").textContent = `${Math.round(s.vibration * 100)}%`;
+  el("volume").value = snapPct(s.volume * 100);
+  el("volVal").textContent = `${snapPct(s.volume * 100)}%`;
+  el("vibration").value = snapPct(s.vibration * 100);
+  el("vibVal").textContent = `${snapPct(s.vibration * 100)}%`;
   renderVibZoneRows(s);
-  const cutoffPct = cutoffHzToPct(s.cutoff_hz ?? s.highpass_hz);
+  const cutoffPct = snapPct(cutoffHzToPct(s.cutoff_hz ?? s.highpass_hz));
   el("highpass").value = cutoffPct;
   el("hpVal").textContent = `${cutoffPct}%`;
 
@@ -1070,10 +1074,10 @@ function render(s) {
     el("demoPrevBtn").classList.toggle("disabled", !demoOn);
     el("demoNextBtn").classList.toggle("disabled", !demoOn);
 
-    el("demoVolume").value = Math.round(s.volume * 100);
-    el("demoVolVal").textContent = `${Math.round(s.volume * 100)}%`;
-    el("demoVibration").value = Math.round(s.vibration * 100);
-    el("demoVibVal").textContent = `${Math.round(s.vibration * 100)}%`;
+    el("demoVolume").value = snapPct(s.volume * 100);
+    el("demoVolVal").textContent = `${snapPct(s.volume * 100)}%`;
+    el("demoVibration").value = snapPct(s.vibration * 100);
+    el("demoVibVal").textContent = `${snapPct(s.vibration * 100)}%`;
     el("demoHighpass").value = cutoffPct;
     el("demoHpVal").textContent = `${cutoffPct}%`;
 

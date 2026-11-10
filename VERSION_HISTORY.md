@@ -28,3 +28,4 @@
 - Now Playing: shows which phone is playing; with a phone connected, Pause silences headphones and vibration on the tablet (Windows can't pause or skip the phone itself, so Back/Next are hidden and songs are changed on the phone)
 - original colours for the vibration dots on the body
 - Settings: Bluetooth name - rename the tablet to "MuVi" (what phones show) with the administrator password, then restart
+- Volume, Vibration and Bass depth sliders move in 2 % steps, so a preferred level is easy to set again

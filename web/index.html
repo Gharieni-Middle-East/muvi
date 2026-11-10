@@ -150,7 +150,7 @@
                     </span>
                   </button>
                 </div>
-                <input type="range" id="volume" min="0" max="100" value="70" class="range" />
+                <input type="range" id="volume" min="0" max="100" step="2" value="70" class="range" />
                 <div class="speaker-route-row hidden" id="speakerRouteCard" aria-label="Audio output">
                   <button type="button" class="route-icon-btn active" id="routeHeadphones" data-route="headphones" title="Headphones" aria-label="Headphones">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0116 0"/><path d="M4 13.5v1.5A2.5 2.5 0 006.5 17H7v-6H5.5A1.5 1.5 0 004 11.5v2z" fill="currentColor" stroke="none"/><path d="M20 13.5v1.5A2.5 2.5 0 0117.5 17H17v-6h1.5A1.5 1.5 0 0120 11.5v2z" fill="currentColor" stroke="none"/></svg>
@@ -167,7 +167,7 @@
                 <div class="slider-head">
                   <svg viewBox="0 0 24 24"><path d="M12 3v18M7 7v10M17 7v10M3 10v4M21 10v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                   <span>Vibration</span>
-                  <span class="slider-val" id="vibVal">27%</span>
+                  <span class="slider-val" id="vibVal">28%</span>
                   <button type="button" class="zone-mute-btn vol-mute-btn" id="vibrationMuteBtn" title="Mute vibration" aria-label="Mute vibration">
                     <span class="zone-mute-icon icon-on" aria-hidden="true">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v18M7 7v10M17 7v10M3 10v4M21 10v4"/></svg>
@@ -177,7 +177,7 @@
                     </span>
                   </button>
                 </div>
-                <input type="range" id="vibration" min="0" max="100" value="27" class="range" />
+                <input type="range" id="vibration" min="0" max="100" step="2" value="28" class="range" />
                 <div class="vib-zone-rows" id="vibZoneRows"></div>
                 <div class="vib-mode-row" id="vibModeCard" aria-label="Vibration routing">
                   <button type="button" class="vib-mode-btn" id="vibModeZones" data-vibmode="zones" title="Each body row drives its own stereo pair">Zones</button>
@@ -192,7 +192,7 @@
                   <span>Bass depth</span>
                   <span class="slider-val" id="hpVal">76%</span>
                 </div>
-                <input type="range" id="highpass" min="0" max="100" value="76" class="range" />
+                <input type="range" id="highpass" min="0" max="100" step="2" value="76" class="range" />
               </div>
             </div>
           </div>
@@ -266,7 +266,7 @@
                     </span>
                   </button>
                 </div>
-                <input type="range" id="demoVolume" min="0" max="100" value="70" class="range" />
+                <input type="range" id="demoVolume" min="0" max="100" step="2" value="70" class="range" />
                 <div class="speaker-route-row hidden" id="demoSpeakerRouteCard" aria-label="Audio output">
                   <button type="button" class="route-icon-btn active" id="demoRouteHeadphones" data-route="headphones" title="Headphones" aria-label="Headphones">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0116 0"/><path d="M4 13.5v1.5A2.5 2.5 0 006.5 17H7v-6H5.5A1.5 1.5 0 004 11.5v2z" fill="currentColor" stroke="none"/><path d="M20 13.5v1.5A2.5 2.5 0 0117.5 17H17v-6h1.5A1.5 1.5 0 0120 11.5v2z" fill="currentColor" stroke="none"/></svg>
@@ -283,7 +283,7 @@
                 <div class="slider-head">
                   <svg viewBox="0 0 24 24"><path d="M12 3v18M7 7v10M17 7v10M3 10v4M21 10v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                   <span>Vibration</span>
-                  <span class="slider-val" id="demoVibVal">27%</span>
+                  <span class="slider-val" id="demoVibVal">28%</span>
                   <button type="button" class="zone-mute-btn vol-mute-btn" id="demoVibrationMuteBtn" title="Mute vibration" aria-label="Mute vibration">
                     <span class="zone-mute-icon icon-on" aria-hidden="true">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v18M7 7v10M17 7v10M3 10v4M21 10v4"/></svg>
@@ -293,7 +293,7 @@
                     </span>
                   </button>
                 </div>
-                <input type="range" id="demoVibration" min="0" max="100" value="27" class="range" />
+                <input type="range" id="demoVibration" min="0" max="100" step="2" value="28" class="range" />
                 <div class="vib-zone-rows" id="demoVibZoneRows"></div>
                 <div class="vib-mode-row" id="demoVibModeCard" aria-label="Vibration routing">
                   <button type="button" class="vib-mode-btn" id="demoVibModeZones" data-vibmode="zones" title="Each body row drives its own stereo pair">Zones</button>
@@ -308,7 +308,7 @@
                   <span>Bass depth</span>
                   <span class="slider-val" id="demoHpVal">76%</span>
                 </div>
-                <input type="range" id="demoHighpass" min="0" max="100" value="76" class="range" />
+                <input type="range" id="demoHighpass" min="0" max="100" step="2" value="76" class="range" />
               </div>
             </div>
           </div>

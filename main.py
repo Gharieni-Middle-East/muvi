@@ -69,6 +69,11 @@ LIVE_RETRY_MAX_S = 30.0
 # User settings that survive a restart (volume, vibration, ...). Calibration has its own file.
 SETTINGS_NAME = "muvi_settings.json"
 SETTINGS_SAVE_EVERY_S = 2.0
+SLIDER_STEP = 0.02  # Volume / Vibration sliders snap to 2 % steps
+
+
+def _snap(value: float) -> float:
+    return round(round(max(0.0, min(1.0, float(value))) / SLIDER_STEP) * SLIDER_STEP, 4)
 _SETTINGS_KEYS = (
     "volume", "vibration", "cutoff_hz", "vibration_mode", "speaker_route",
     "zone_enabled", "gigaport_roles_flipped",
@@ -107,6 +112,9 @@ def _load_settings() -> dict[str, Any]:
 
     _num("volume", 0.0, 1.0)
     _num("vibration", 0.0, 1.0)
+    for key in ("volume", "vibration"):
+        if key in out:
+            out[key] = _snap(out[key])
     _num("cutoff_hz", 40.0, 250.0)
     if raw.get("vibration_mode") in ("haptics", "zones", "stereo"):
         out["vibration_mode"] = raw["vibration_mode"]
@@ -134,7 +142,7 @@ class Api:
         self.state: dict[str, Any] = {
             "playing": False,
             "volume": 0.70,
-            "vibration": 0.27,
+            "vibration": 0.28,
             "cutoff_hz": 200.0,  # ~76% bass cutoff (40–250 Hz)
             "highpass_hz": 200.0,
             "position": 0.0,
@@ -1153,7 +1161,7 @@ class Api:
     # ---------------------------------------------------------------- controls --
     def set_volume(self, value: float) -> dict[str, Any]:
         self._clear_live_pause()
-        vol = max(0.0, min(1.0, float(value)))
+        vol = _snap(value)
         mute = vol <= 0.0
         with self._lock:
             self.state["volume"] = vol
@@ -1174,7 +1182,7 @@ class Api:
 
     def set_vibration(self, value: float) -> dict[str, Any]:
         self._clear_live_pause()
-        vib = max(0.0, min(1.0, float(value)))
+        vib = _snap(value)
         mute = vib <= 0.0
         with self._lock:
             self.state["vibration"] = vib
