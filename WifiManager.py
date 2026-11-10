@@ -186,6 +186,66 @@ async def _try_enable_radio() -> bool:
     return False
 
 
+_RADIO_KIND_WIFI = 1          # Windows.Devices.Radios.RadioKind.WiFi
+_RADIO_ON, _RADIO_OFF = 1, 2  # RadioState.On / RadioState.Off
+_RADIO_ACCESS_ALLOWED = 1     # RadioAccessStatus.Allowed
+
+
+async def _wifi_radio():
+    from winrt.windows.devices.radios import Radio
+    await Radio.request_access_async()
+    for radio in await Radio.get_radios_async():
+        if int(radio.kind) == _RADIO_KIND_WIFI:
+            return radio
+    return None
+
+
+def radio_state() -> Optional[bool]:
+    """True if the Wi-Fi radio is on, False if it is off, None if unknown (no radio or no access)."""
+    if not AVAILABLE:
+        return None
+    try:
+        radio = _run(_wifi_radio())
+    except Exception as exc:  # noqa: BLE001
+        _log(f"Could not read the Wi-Fi radio state: {exc!r}")
+        return None
+    if radio is None:
+        return None
+    return int(radio.state) == _RADIO_ON
+
+
+def set_radio(on: bool) -> bool:
+    """Switch only the Wi-Fi radio on or off (Bluetooth is not touched). Returns the new state.
+
+    Used to test whether Wi-Fi traffic on the shared Wi-Fi/Bluetooth chip disturbs the
+    Bluetooth audio. Saved networks stay saved; Windows reconnects by itself when it is back on.
+    """
+    _require_available()
+
+    async def _set():
+        radio = await _wifi_radio()
+        if radio is None:
+            raise WifiError("No Wi-Fi radio found on this tablet")
+        target = _RADIO_ON if on else _RADIO_OFF
+        if int(radio.state) != target:
+            access = await radio.set_state_async(radio.state.__class__(target))
+            if int(access) != _RADIO_ACCESS_ALLOWED:
+                _log(f"Wi-Fi radio change refused by Windows: {access}")
+                raise WifiError(
+                    f"Windows didn't allow the app to turn Wi-Fi {'on' if on else 'off'}. "
+                    "Check that airplane mode is off."
+                )
+        for _ in range(10):  # the state can lag the call by a moment
+            if int(radio.state) == target:
+                break
+            await asyncio.sleep(0.3)
+        return int(radio.state) == _RADIO_ON
+
+    state = _run(_set())
+    _log(f"Wi-Fi radio switched {'on' if on else 'off'} (now {'on' if state else 'off'})")
+    return state
+
+
 def saved_profiles() -> set:
     """Names of Wi-Fi networks saved on this tablet (netsh works in every Windows language)."""
     if os.name != "nt":

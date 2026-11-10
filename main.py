@@ -1401,6 +1401,12 @@ class Api:
         self._wifi.connect(str(ssid or ""), password or None)
         return self.get_state()
 
+    def wifi_set_radio(self, on: bool) -> dict[str, Any]:
+        """Wi-Fi on/off switch (Wi-Fi screen). Bluetooth is not affected."""
+        self._wifi.set_radio(bool(on))
+        with self._lock:
+            return self._snapshot()
+
     def wifi_disconnect(self) -> dict[str, Any]:
         self._wifi.disconnect()
         return self.get_state()

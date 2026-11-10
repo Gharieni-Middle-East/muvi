@@ -228,6 +228,8 @@ html, body {
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 .hw-swap-card[hidden] { display: none !important; }
+.wifi-radio-card { margin: 0 0 14px; }
+.wifi-radio-card.off { border-color: rgba(255, 207, 110, 0.45); }
 .hw-swap-text { flex: 1; min-width: 0; }
 .hw-swap-text strong {
   display: block;

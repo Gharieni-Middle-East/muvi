@@ -5,7 +5,8 @@ Wraps WifiManager (Windows WinRT Wi-Fi, blocking calls) in background threads an
 small JSON-friendly state the UI polls through Api.get_state():
 
     {"available", "scanning", "networks": [...], "current_ssid", "internet",
-     "connecting_ssid", "disconnecting", "message", "message_kind", "error_ssid"}
+     "connecting_ssid", "disconnecting", "message", "message_kind", "error_ssid",
+     "radio_on", "radio_switching"}
 """
 
 from __future__ import annotations
@@ -50,6 +51,8 @@ class WifiService:
             "message": "" if WifiManager.AVAILABLE else "Wi-Fi is not available",
             "message_kind": "info" if WifiManager.AVAILABLE else "error",
             "error_ssid": None,
+            "radio_on": None,         # Wi-Fi radio: True on, False off, None not known yet
+            "radio_switching": False,
         }
 
     # ------------------------------------------------------------ helpers
@@ -110,6 +113,12 @@ class WifiService:
         self._last_status = now
 
         def job():
+            radio = WifiManager.radio_state()  # follows changes made in Windows quick settings
+            if radio is not None and not self.state["radio_switching"]:
+                self._update(radio_on=radio)
+            if radio is False:
+                self._update(current_ssid="", internet="none")
+                return
             result = WifiManager.status()
             self._update(current_ssid=result.current_ssid, internet=result.internet)
         self._run(job, "wifi-status")
@@ -117,6 +126,10 @@ class WifiService:
     # ------------------------------------------------------------ actions
     def scan(self) -> None:
         if not WifiManager.AVAILABLE:
+            return
+        if self.state["radio_on"] is False:
+            # A scan would quietly switch the radio back on (WifiManager.scan), so don't.
+            self._update(message="Wi-Fi is off. Turn it on to see the networks.", message_kind="info")
             return
 
         def job():
@@ -158,6 +171,44 @@ class WifiService:
                          current_ssid=scan.current_ssid, internet=scan.internet)
         if self._run(job, "wifi-connect"):
             self._update(connecting_ssid=ssid, message="", error_ssid=None)
+
+    def set_radio(self, on: bool) -> None:
+        """Turn the Wi-Fi radio on or off. Runs on its own thread so a running status check
+        can't swallow the request."""
+        if not WifiManager.AVAILABLE:
+            return
+        with self._lock:
+            if self.state["radio_switching"]:
+                return
+            self.state["radio_switching"] = True
+            self.state["message"] = ""
+            self.state["error_ssid"] = None
+
+        def work():
+            try:
+                state = WifiManager.set_radio(on)
+                if state:
+                    self._update(
+                        radio_on=True,
+                        message="Wi-Fi is on. Windows reconnects to a saved network in a few seconds.",
+                        message_kind="ok",
+                    )
+                    # Pick up the reconnect soon instead of waiting the full status interval.
+                    self._last_status = time.monotonic() - STATUS_REFRESH_SECONDS + 8
+                else:
+                    self._update(
+                        radio_on=False, current_ssid="", internet="none", networks=[], scanned=False,
+                        message="Wi-Fi is off. Bluetooth now has the tablet's radio to itself.",
+                        message_kind="info",
+                    )
+            except WifiManager.WifiError as exc:
+                self._update(message=str(exc), message_kind="error")
+            except Exception as exc:  # noqa: BLE001 - never crash the app
+                WifiManager._log(f"Unexpected error switching Wi-Fi: {exc!r}")
+                self._update(message="Could not switch Wi-Fi", message_kind="error")
+            finally:
+                self._update(radio_switching=False)
+        threading.Thread(target=work, name="wifi-radio", daemon=True).start()
 
     def disconnect(self) -> None:
         if not WifiManager.AVAILABLE:

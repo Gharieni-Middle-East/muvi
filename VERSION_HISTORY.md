@@ -14,3 +14,4 @@
 - restart the app automatically if it crashes or closes (kiosk tablets)
 - haptics now match the Raspberry Pi app: no rattle when Windows runs at 48 kHz, soft limiting instead of hard clipping, 8 separate channels on dual ASIO4ALL
 - add haptics calibration in Settings: level, on/off and body position per transducer, overall haptic level, step-by-step test that pulses one transducer at a time
+- add Wi-Fi on/off switch on the Wi-Fi screen (to test whether Wi-Fi disturbs the Bluetooth audio)

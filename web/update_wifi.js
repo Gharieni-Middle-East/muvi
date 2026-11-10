@@ -155,6 +155,42 @@ function wifiBars(bars) {
     <path${on(2)} d="M8.5 15.5a5 5 0 017 0"/><circle${on(1)} cx="12" cy="19" r="1.4" fill="currentColor" stroke="none"/></svg>`;
 }
 
+// Wi-Fi on/off switch: what the user just asked for, shown until the switch finishes.
+let wifiRadioPending = null;
+let wifiRadioSawBusy = false;
+
+function renderWifiRadio(w) {
+  const tog = el("wifiRadioToggle");
+  if (!tog) return;
+  if (w.radio_switching) wifiRadioSawBusy = true;
+  else if (wifiRadioSawBusy) { wifiRadioPending = null; wifiRadioSawBusy = false; }
+  const on = wifiRadioPending !== null ? wifiRadioPending : w.radio_on !== false;
+  tog.checked = on;
+  tog.disabled = !w.available || Boolean(w.radio_switching) || wifiRadioPending !== null;
+  el("wifiRadioCard").classList.toggle("off", w.radio_on === false);
+  el("wifiRadioSub").textContent = !w.available
+    ? "Wi-Fi is not available on this tablet."
+    : w.radio_switching || wifiRadioPending !== null
+      ? (on ? "Turning Wi-Fi on…" : "Turning Wi-Fi off…")
+      : w.radio_on === false
+        ? "Off. Bluetooth has the radio to itself. Updates need Wi-Fi."
+        : "On. Turn off to test whether Wi-Fi disturbs the Bluetooth audio.";
+}
+
+async function onWifiRadioToggle(e) {
+  wifiRadioPending = Boolean(e.target.checked);
+  wifiRadioSawBusy = false;
+  wifiPasswordFor = null;
+  try {
+    const s = await api.wifi_set_radio(wifiRadioPending);
+    // Request ignored (already switching / no Wi-Fi): show the real state again.
+    if (!(s && s.wifi && s.wifi.radio_switching)) wifiRadioPending = null;
+    render(s);
+  } catch (err) {
+    wifiRadioPending = null;
+  }
+}
+
 function wifiBusy(w) {
   return Boolean(w.scanning || w.connecting_ssid || w.disconnecting);
 }
@@ -164,22 +200,28 @@ function renderWifi(s) {
   if (!w || !el("screen-wifi")) return;
   lastWifi = w;
   const busy = wifiBusy(w);
+  const radioOff = w.radio_on === false;
+  renderWifiRadio(w);
 
   const scanBtn = el("wifiScanBtn");
   scanBtn.classList.toggle("scanning", Boolean(w.scanning));
-  scanBtn.disabled = busy || !w.available;
+  scanBtn.disabled = busy || !w.available || radioOff || Boolean(w.radio_switching);
   el("wifiScanLabel").textContent = w.scanning ? "Scanning…" : "Scan";
 
   const card = el("wifiStatusCard");
   const connected = Boolean(w.current_ssid);
   card.classList.toggle("online", connected && w.internet === "internet");
   card.classList.toggle("warn", connected && w.internet !== "internet");
-  el("wifiStatusTitle").textContent = connected ? `Connected to ${w.current_ssid}` : "Not connected";
+  el("wifiStatusTitle").textContent = connected
+    ? `Connected to ${w.current_ssid}`
+    : radioOff ? "Wi-Fi is off" : "Not connected";
   el("wifiStatusSub").textContent = connected
     ? w.internet_text
-    : w.available
-      ? "Scan to see the networks nearby."
-      : "Wi-Fi is not available on this tablet.";
+    : !w.available
+      ? "Wi-Fi is not available on this tablet."
+      : radioOff
+        ? "Turn Wi-Fi on to see the networks nearby."
+        : "Scan to see the networks nearby.";
   const disc = el("wifiDisconnectBtn");
   disc.hidden = !connected;
   disc.disabled = busy;
@@ -197,7 +239,7 @@ function renderWifi(s) {
 function renderWifiList(w) {
   const list = el("wifiList");
   const sig = JSON.stringify([w.networks, w.connecting_ssid, w.error_ssid, w.message, w.scanning,
-    w.scanned, w.disconnecting, wifiPasswordFor, wifiShowPassword]);
+    w.scanned, w.disconnecting, wifiPasswordFor, wifiShowPassword, w.radio_on]);
   if (sig === lastWifiSig) return;
   lastWifiSig = sig;
 
@@ -212,8 +254,11 @@ function renderWifiList(w) {
   if (!nets.length) {
     const li = document.createElement("li");
     li.className = "device empty" + (w.scanning ? " scanning" : "");
-    const title = w.scanning ? "Scanning…" : w.scanned ? "No Wi-Fi networks found" : "No networks yet";
-    const sub = w.scanning ? "Looking for networks nearby." : "Press Scan to see the networks nearby.";
+    const off = w.radio_on === false;
+    const title = off ? "Wi-Fi is off" : w.scanning ? "Scanning…" : w.scanned ? "No Wi-Fi networks found" : "No networks yet";
+    const sub = off
+      ? "Turn Wi-Fi on with the switch above."
+      : w.scanning ? "Looking for networks nearby." : "Press Scan to see the networks nearby.";
     li.innerHTML = `<div class="device-meta"><span class="device-name">${title}</span><span class="device-sub">${sub}</span></div>`;
     list.appendChild(li);
     return;
@@ -304,7 +349,8 @@ async function submitWifiPassword() {
 function openWifiScreen() {
   navigateToScreen("wifi");
   const w = lastWifi;
-  if (w && w.available && !w.scanned && !wifiBusy(w)) {
+  // No automatic scan while the radio is off: a scan would switch it back on.
+  if (w && w.available && w.radio_on !== false && !w.radio_switching && !w.scanned && !wifiBusy(w)) {
     Promise.resolve(api.wifi_scan()).then(render).catch(() => {});
   }
 }
@@ -313,6 +359,7 @@ window.addEventListener("DOMContentLoaded", () => {
   el("updateBtn")?.addEventListener("click", onUpdateButton);
   el("updateWifiBtn")?.addEventListener("click", openWifiScreen);
   document.querySelector('.nav-item[data-screen="wifi"]')?.addEventListener("click", openWifiScreen);
+  el("wifiRadioToggle")?.addEventListener("change", onWifiRadioToggle);
   el("wifiScanBtn")?.addEventListener("click", async () => {
     wifiPasswordFor = null;
     render(await api.wifi_scan());
@@ -342,6 +389,7 @@ window.addEventListener("DOMContentLoaded", () => {
     available: true, scanning: false, scanned: false, networks: [], current_ssid: "",
     internet: "none", internet_text: "No internet access", connecting_ssid: null,
     disconnecting: false, message: "", message_kind: "info", error_ssid: null,
+    radio_on: true, radio_switching: false,
   };
   const NETS = [
     { ssid: "Gharieni Office", bars: 4, secured: true, enterprise: false, saved: true, connected: false },
@@ -381,6 +429,19 @@ window.addEventListener("DOMContentLoaded", () => {
     },
     update_cancel: async () => { upd.state = "available"; return MockApi.get_state(); },
     clear_update_notice: async () => MockApi.get_state(),
+    wifi_set_radio: async (on) => {
+      wifi.radio_switching = true;
+      setTimeout(() => {
+        wifi.radio_switching = false;
+        wifi.radio_on = Boolean(on);
+        if (!on) { wifi.current_ssid = ""; wifi.networks = []; wifi.scanned = false; wifi.internet = "none"; }
+        wifi.message = on ? "Wi-Fi is on. Windows reconnects to a saved network in a few seconds."
+          : "Wi-Fi is off. Bluetooth now has the tablet's radio to itself.";
+        wifi.message_kind = on ? "ok" : "info";
+        mark();
+      }, 800);
+      return MockApi.get_state();
+    },
     wifi_scan: async () => {
       wifi.scanning = true;
       setTimeout(() => {
