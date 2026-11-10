@@ -25,4 +25,5 @@
 - logs for support in C:\kiosk_launcher\updates\app.log and engine.log
 - fix: Bluetooth Live didn't start while the haptics calibration had the Gigaports open
 - new look in the Gharieni style: Raleway type, black / warm grey / cream with a bronze accent, hairline sliders and lists (all screens)
-- Now Playing: with a phone connected, Play/Pause, Back and Next control the music on the phone; the screen shows which phone is playing
+- Now Playing: shows which phone is playing; with a phone connected, Pause silences headphones and vibration on the tablet (Windows can't pause or skip the phone itself, so Back/Next are hidden and songs are changed on the phone)
+- original colours for the vibration dots on the body

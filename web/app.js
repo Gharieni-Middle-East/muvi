@@ -108,7 +108,7 @@ const MockApi = (() => {
     },
     seek: async (s) => { state.position = Math.max(0, Math.min(state.track.duration, s)); return snap(); },
     previous_track: async () => { state.position = 0; return snap(); },
-    media_play_pause: async () => { state.media.phone_playing = !state.media.phone_playing; return snap(); },
+    media_play_pause: async () => { state.live_paused = !state.live_paused; return snap(); },
     next_track: async () => { state.position = 0; if (state.live_mode !== "demo") state.track.title = "Next Track"; return snap(); },
     set_volume: async (v) => {
       state.volume = v;
@@ -882,13 +882,14 @@ function render(s) {
 
   const playBtn = el("playBtn");
   const phoneLinked = Boolean(s.bluetooth.connected_id);
-  const phonePlaying = Boolean(s.media && s.media.phone_playing);
-  // Phone connected: Play/Pause / Back / Next control the music on the phone (Live keeps
-  // running underneath). While reconnecting the button waits. AUX: Play = Start/Stop Live.
+  // Windows can't send play/pause/skip back to the phone, so with a phone connected
+  // Play/Pause pauses on the tablet (headphones + vibration silent, phone keeps playing) and
+  // Back/Next are hidden. AUX: Play = Start/Stop Live.
+  const phonePlaying = !s.live_paused;
   if (btSession) {
     playBtn.hidden = false;
     playBtn.disabled = !phoneLinked || !liveOn;
-    playBtn.title = phonePlaying ? "Pause the phone" : "Play on the phone";
+    playBtn.title = phonePlaying ? "Pause on the tablet" : "Resume";
   } else {
     playBtn.hidden = false;
     playBtn.disabled = busy || (!liveOn && !canStartLive);
@@ -914,10 +915,10 @@ function render(s) {
 
   const hint = el("liveHint");
   if (hint) {
-    if (btSession && s.media_error) {
-      hint.textContent = s.media_error;
+    if (btSession && liveOn && s.live_paused) {
+      hint.textContent = "Paused on the tablet. The phone keeps playing.";
     } else if (btSession && liveOn) {
-      hint.textContent = "";
+      hint.textContent = "Play, pause and skip songs on your phone.";
     } else if (btSession && busy) {
       hint.textContent = "Starting Bluetooth Live…";
     } else if (btSession && s.engine_error) {
@@ -947,9 +948,12 @@ function render(s) {
   seekEl.classList.toggle("disabled", seekEl.disabled);
   const prevBtn = el("prevBtn");
   const nextBtn = el("nextBtn");
-  const btConnected = Boolean(s.bluetooth && s.bluetooth.connected_id);
-  prevBtn.disabled = demoOn || !(media.can_prev || btConnected);
-  nextBtn.disabled = demoOn || !(media.can_next || btConnected);
+  // The phone can't be skipped from the tablet (Windows limitation): hide Back/Next for it.
+  const phoneSession = Boolean(s.bluetooth && (s.bluetooth.connected_id || s.bluetooth.waiting_id));
+  prevBtn.hidden = phoneSession;
+  nextBtn.hidden = phoneSession;
+  prevBtn.disabled = demoOn || phoneSession || !media.can_prev;
+  nextBtn.disabled = demoOn || phoneSession || !media.can_next;
   prevBtn.classList.toggle("disabled", prevBtn.disabled);
   nextBtn.classList.toggle("disabled", nextBtn.disabled);
 

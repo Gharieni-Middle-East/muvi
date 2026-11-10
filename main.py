@@ -60,12 +60,10 @@ BT_IDLE_ENGINE_STOP_S = 300.0  # Bluetooth Live keeps the Gigaports open this lo
 LIVE_RETRY_MIN_S = 2.0
 LIVE_RETRY_MAX_S = 30.0
 
-# Phone play/pause state when Windows doesn't report it: music counts as playing while audio
-# arrives (input level above PHONE_SIGNAL_RMS within the last PHONE_SIGNAL_HOLD_S), and a tap
-# on Play/Pause flips the icon straight away for PHONE_TAP_HOLD_S.
-PHONE_SIGNAL_RMS = 0.002
-PHONE_SIGNAL_HOLD_S = 2.5
-PHONE_TAP_HOLD_S = 4.0
+# Windows can't send play/pause/skip back to a phone that streams to the tablet (its Bluetooth
+# audio receiver has no remote-control channel), so with a phone connected the Now Playing
+# Play/Pause button pauses on the tablet: headphones and vibration go silent, the phone keeps
+# playing. Back/Next are hidden and the user controls the music on the phone.
 
 # User settings that survive a restart (volume, vibration, ...). Calibration has its own file.
 SETTINGS_NAME = "muvi_settings.json"
@@ -208,7 +206,7 @@ class Api:
             "haptic_cal": haptics_calibration.load(),
             "haptic_cal_dirty": False,
             "haptic_cal_error": None,
-            "media_error": None,  # phone didn't take a play/pause from Now Playing
+            "live_paused": False,  # Bluetooth Live paused on the tablet (audio + vibration silent)
             "calibrating": None,  # Gigaport channel 1-8 playing the calibration tone, or None
             "calibration_busy": False,
         }
@@ -259,9 +257,7 @@ class Api:
         self._bt_reopen_at = 0.0
         self._bt_reopen_busy = False
         self._bt_idle_since: float | None = None
-        # Phone transport (Now Playing play/pause controls the phone's music).
-        self._phone_signal_at = 0.0
-        self._phone_tap: tuple[float, bool] | None = None  # (time, playing after tap)
+
         self._last_paired_refresh = 0.0
         self._paired_refresh_busy = False
         self._battery = BatteryManager()
@@ -309,7 +305,7 @@ class Api:
         self._refresh_media()
         self._maybe_save_settings()
         with self._lock:
-            if self.state["playing"] and self._engine.available:
+            if self.state["playing"] and self._engine.available and not self.state.get("live_paused"):
                 stats = self._last_stats
                 self.state["input_rms"] = float(stats.get("input_rms", 0.0))
                 # One signal per shaker row (head, upper back, mid back, legs)
@@ -743,11 +739,9 @@ class Api:
             self.state["media"] = {
                 "ok": has_smtc,
                 "can_seek": bool(info.get("can_seek")) and has_smtc,
-                # Prev/next/play-pause reach the phone via media keys even without song metadata.
-                "can_prev": bool(connected_id) or bool(info.get("can_prev")),
-                "can_next": bool(connected_id) or bool(info.get("can_next")),
-                "can_play_pause": bool(connected_id),
-                "phone_playing": self._phone_playing_locked(info if info.get("ok") else None),
+                # Only a Windows media session can be skipped; a Bluetooth phone can't (see top).
+                "can_prev": has_smtc and bool(info.get("can_prev")),
+                "can_next": has_smtc and bool(info.get("can_next")),
                 "via": info.get("via"),
             }
 
@@ -904,6 +898,7 @@ class Api:
                 self.state["demo"]["error"] = None
                 if result.get("ok"):
                     self._live_started_at = time.monotonic()
+                    self.state["live_paused"] = False  # the new engine starts with the user's mutes
                 else:
                     self._live_started_at = None
                     self.state["bluetooth"]["error"] = result.get("error")
@@ -1087,35 +1082,38 @@ class Api:
         with self._lock:
             return self._snapshot()
 
-    def _phone_playing_locked(self, smtc: dict[str, Any] | None) -> bool:
-        """Is the phone's music playing? Windows' own report when there is one; otherwise
-        'audio is arriving', with a tap on Play/Pause taking effect immediately."""
-        now = time.monotonic()
-        if float(self.state.get("input_rms") or 0.0) > PHONE_SIGNAL_RMS:
-            self._phone_signal_at = now
-        tap = self._phone_tap
-        if tap is not None and now - tap[0] < PHONE_TAP_HOLD_S:
-            return tap[1]
-        if smtc is not None:
-            return bool(smtc.get("playing"))
-        return self.state.get("live_mode") == "cable" and now - self._phone_signal_at < PHONE_SIGNAL_HOLD_S
+    def _push_mutes(self) -> None:
+        """Send the effective mutes to the engine: user mutes, plus everything while paused."""
+        with self._lock:
+            paused = bool(self.state.get("live_paused"))
+            audio = paused or bool(self.state.get("audio_muted"))
+            vib = paused or bool(self.state.get("vibration_muted"))
+        self._engine.set_audio_muted(audio)
+        self._engine.set_vibration_muted(vib)
+
+    def _clear_live_pause(self) -> None:
+        """Touching a sound control (or Live restarting) ends a tablet pause."""
+        with self._lock:
+            was = bool(self.state.get("live_paused"))
+            self.state["live_paused"] = False
+        if was:
+            self._push_mutes()
 
     def media_play_pause(self) -> dict[str, Any]:
-        """Now Playing Play/Pause while a phone is connected: pause / resume the phone's music.
-        The vibration engine keeps running (it just gets silence while paused)."""
+        """Now Playing Play/Pause while a phone is connected: pause / resume on the tablet.
+
+        The phone can't be paused from here (see the note at the top), so the headphones and
+        the vibration are silenced instead; the engine keeps running, so resume is instant."""
         with self._lock:
             phone = bool(self.state["bluetooth"].get("connected_id"))
-            was_playing = bool((self.state.get("media") or {}).get("phone_playing"))
-        if not phone:
+            live = bool(self.state.get("playing")) and self.state.get("live_mode") == "cable"
+        if not phone or not live:
             return self.toggle_play()
-        result = self._media.play_pause()
         with self._lock:
-            if result.get("ok"):
-                self._phone_tap = (time.monotonic(), not was_playing)
-                self.state["media_error"] = None
-            else:
-                self.state["media_error"] = "The phone didn't respond. Use play/pause on the phone."
-        self._refresh_media()
+            self.state["live_paused"] = not bool(self.state.get("live_paused"))
+            paused = self.state["live_paused"]
+        print(f"[app] Bluetooth Live {'paused' if paused else 'resumed'} on the tablet")
+        self._push_mutes()
         with self._lock:
             return self._snapshot()
 
@@ -1141,6 +1139,7 @@ class Api:
 
     # ---------------------------------------------------------------- controls --
     def set_volume(self, value: float) -> dict[str, Any]:
+        self._clear_live_pause()
         vol = max(0.0, min(1.0, float(value)))
         mute = vol <= 0.0
         with self._lock:
@@ -1153,6 +1152,7 @@ class Api:
             return self._snapshot()
 
     def set_audio_muted(self, muted: bool) -> dict[str, Any]:
+        self._clear_live_pause()
         with self._lock:
             self.state["audio_muted"] = bool(muted)
         self._engine.set_audio_muted(bool(muted))
@@ -1160,6 +1160,7 @@ class Api:
             return self._snapshot()
 
     def set_vibration(self, value: float) -> dict[str, Any]:
+        self._clear_live_pause()
         vib = max(0.0, min(1.0, float(value)))
         mute = vib <= 0.0
         with self._lock:
@@ -1172,6 +1173,7 @@ class Api:
             return self._snapshot()
 
     def set_vibration_muted(self, muted: bool) -> dict[str, Any]:
+        self._clear_live_pause()
         with self._lock:
             self.state["vibration_muted"] = bool(muted)
         self._engine.set_vibration_muted(bool(muted))
@@ -1179,6 +1181,7 @@ class Api:
             return self._snapshot()
 
     def set_zone_enabled(self, zone: str, enabled: bool) -> dict[str, Any]:
+        self._clear_live_pause()
         key = str(zone).strip().lower()
         if key not in ("head", "upper", "mid", "legs"):
             with self._lock:
@@ -1752,6 +1755,7 @@ class Api:
             bt["waiting_id"] = None
             bt["waiting_kind"] = None
             bt["error"] = None
+            self.state["live_paused"] = False
             for d in self._devices:
                 if d.get("id") in ids:
                     d["profile"] = "Paired - tap Connect"
