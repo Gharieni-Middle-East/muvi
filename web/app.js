@@ -9,6 +9,7 @@ const MockApi = (() => {
     playing: false, play_busy: false, volume: 0.70, vibration: 0.27, highpass_hz: 200, cutoff_hz: 200, position: 0,
     speaker_route: "headphones", vibration_mode: "haptics", output_layout: null,
     live_mode: null,
+    device_name: { name: "DESKTOP-7Q2K1LM", next_name: "DESKTOP-7Q2K1LM", target: "MuVi", ok: false, restart_needed: false, supported: true },
     zone_enabled: { head: true, upper: true, mid: true, legs: true },
     audio_muted: false,
     vibration_muted: false,
@@ -108,6 +109,8 @@ const MockApi = (() => {
     },
     seek: async (s) => { state.position = Math.max(0, Math.min(state.track.duration, s)); return snap(); },
     previous_track: async () => { state.position = 0; return snap(); },
+    set_bluetooth_name: async () => { state.device_name = { ...state.device_name, next_name: "MuVi", restart_needed: true }; return snap(); },
+    restart_tablet: async () => snap(),
     media_play_pause: async () => { state.live_paused = !state.live_paused; return snap(); },
     next_track: async () => { state.position = 0; if (state.live_mode !== "demo") state.track.title = "Next Track"; return snap(); },
     set_volume: async (v) => {
@@ -832,9 +835,41 @@ document.addEventListener("input", (e) => {
   if (e.target && e.target.type === "range") syncRangeFill(e.target);
 }, true);
 
+// Settings -> Bluetooth name (the tablet's Windows name, which phones show).
+function renderBtName(s) {
+  const d = s.device_name;
+  const card = el("btNameCard");
+  if (!card || !d) return;
+  card.hidden = d.supported === false;
+  const status = el("btNameStatus");
+  const btn = el("btNameBtn");
+  const restart = el("btNameRestartBtn");
+  let text;
+  let cls = "";
+  if (d.ok) {
+    text = `Phones see this tablet as “${d.name}”.`;
+    cls = "ok";
+  } else if (d.restart_needed) {
+    text = `Renamed to “${d.next_name}”. Restart the tablet to finish.`;
+    cls = "accent";
+  } else {
+    text = `Phones see this tablet as “${d.name || "?"}”. Setting it to “${d.target}” needs the administrator password once.`;
+  }
+  if (d.message) {
+    text = d.message;
+    cls = "error";
+  }
+  status.textContent = text;
+  status.className = `update-status ${cls}`.trim();
+  btn.hidden = Boolean(d.ok || d.restart_needed);
+  btn.textContent = `Set to ${d.target || "MuVi"}`;
+  restart.hidden = !d.restart_needed;
+}
+
 function render(s) {
   if (!s) return;
   lastState = s;
+  renderBtName(s);
   requestAnimationFrame(syncAllRanges);
   if (typeof renderCalibration === "function") renderCalibration(s);
   const liveOn = isLivePlaying(s);
@@ -1422,6 +1457,20 @@ function wire() {
     } finally {
       seeking = false;
     }
+  });
+
+  el("btNameBtn")?.addEventListener("click", async () => {
+    if (api.set_bluetooth_name) render(await api.set_bluetooth_name());
+  });
+  el("btNameRestartBtn")?.addEventListener("click", async () => {
+    const go = typeof showDialog === "function"
+      ? await showDialog({
+          title: "Restart the tablet?",
+          text: "The tablet restarts now and comes back as \u201cMuVi\u201d. A connected phone is disconnected.",
+          buttons: [{ label: "Cancel", value: false }, { label: "Restart", value: true, primary: true }],
+        })
+      : true;
+    if (go && api.restart_tablet) render(await api.restart_tablet());
   });
 
   el("prevBtn").addEventListener("click", async () => {

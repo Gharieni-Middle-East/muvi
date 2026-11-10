@@ -27,3 +27,4 @@
 - new look in the Gharieni style: Raleway type, black / warm grey / cream with a bronze accent, hairline sliders and lists (all screens)
 - Now Playing: shows which phone is playing; with a phone connected, Pause silences headphones and vibration on the tablet (Windows can't pause or skip the phone itself, so Back/Next are hidden and songs are changed on the phone)
 - original colours for the vibration dots on the body
+- Settings: Bluetooth name - rename the tablet to "MuVi" (what phones show) with the administrator password, then restart

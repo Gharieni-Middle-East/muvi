@@ -31,6 +31,7 @@ import webview
 
 import AppWatchdog
 import UpdateManager
+import device_name
 from audio import haptics_calibration
 from bt_audio import BluetoothAudioService
 from battery_manager import BatteryManager
@@ -266,6 +267,10 @@ class Api:
         self._updater = UpdateManager.UpdateController(on_quit=self._quit_for_update)
         self._wifi = WifiService()
         self._update_notice = UpdateManager.take_update_notice()
+        # Bluetooth name = Windows computer name (Settings -> Bluetooth name).
+        self._device_name: dict[str, Any] = device_name.info()
+        self._device_name_at = 0.0
+        self._device_name_msg: str | None = None
         self._hardware_last_poll = 0.0
         self._hardware_cache: dict[str, Any] = {
             "gigaport_connected": False,
@@ -808,6 +813,14 @@ class Api:
         snap["app_version"] = UpdateManager.current_version()
         snap["update"] = self._updater.snapshot()
         snap["update_notice"] = self._update_notice
+        now = time.monotonic()
+        if now - self._device_name_at > 5.0:
+            self._device_name_at = now
+            try:
+                self._device_name = device_name.info()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[app] device name: {exc}")
+        snap["device_name"] = {**self._device_name, "message": self._device_name_msg}
         snap["wifi"] = self._wifi.snapshot()
         snap["wifi"]["phone_active"] = self._phone_active_locked()
         snap["wifi"]["off_for_bluetooth"] = bool(self._wifi_off_for_bt)
@@ -1898,6 +1911,32 @@ class Api:
         except Exception as exc:  # noqa: BLE001
             print(f"[update] close window: {exc}")
             os._exit(0)
+
+    # ---------------------------------------------------------- Bluetooth name --
+    def set_bluetooth_name(self) -> dict[str, Any]:
+        """Rename the tablet to "MuVi" (phones show this name). Needs the admin prompt."""
+        result = device_name.request_rename()
+        print(f"[app] Bluetooth name -> {device_name.TARGET_NAME}: {result}")
+        self._device_name_msg = (
+            None if result.get("ok") else result.get("error") or "Could not rename the tablet."
+        )
+        self._device_name_at = 0.0  # re-read soon (the rename takes a few seconds)
+        return self.get_state()
+
+    def restart_tablet(self) -> dict[str, Any]:
+        """Restart Windows to apply the new Bluetooth name."""
+        print("[app] restarting the tablet for the new Bluetooth name")
+        self._maybe_save_settings(force=True)
+        try:
+            self._engine.stop_live()
+            if self._bt.available:
+                self._bt.disconnect(forget=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[app] before restart: {exc}")
+        result = device_name.restart_tablet()
+        if not result.get("ok"):
+            self._device_name_msg = result.get("error") or "Could not restart. Restart the tablet by hand."
+        return self.get_state()
 
     # ------------------------------------------------------------------- Wi-Fi --
     def wifi_scan(self) -> dict[str, Any]:
