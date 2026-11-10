@@ -60,6 +60,13 @@ BT_IDLE_ENGINE_STOP_S = 300.0  # Bluetooth Live keeps the Gigaports open this lo
 LIVE_RETRY_MIN_S = 2.0
 LIVE_RETRY_MAX_S = 30.0
 
+# Phone play/pause state when Windows doesn't report it: music counts as playing while audio
+# arrives (input level above PHONE_SIGNAL_RMS within the last PHONE_SIGNAL_HOLD_S), and a tap
+# on Play/Pause flips the icon straight away for PHONE_TAP_HOLD_S.
+PHONE_SIGNAL_RMS = 0.002
+PHONE_SIGNAL_HOLD_S = 2.5
+PHONE_TAP_HOLD_S = 4.0
+
 # User settings that survive a restart (volume, vibration, ...). Calibration has its own file.
 SETTINGS_NAME = "muvi_settings.json"
 SETTINGS_SAVE_EVERY_S = 2.0
@@ -201,6 +208,7 @@ class Api:
             "haptic_cal": haptics_calibration.load(),
             "haptic_cal_dirty": False,
             "haptic_cal_error": None,
+            "media_error": None,  # phone didn't take a play/pause from Now Playing
             "calibrating": None,  # Gigaport channel 1-8 playing the calibration tone, or None
             "calibration_busy": False,
         }
@@ -251,6 +259,9 @@ class Api:
         self._bt_reopen_at = 0.0
         self._bt_reopen_busy = False
         self._bt_idle_since: float | None = None
+        # Phone transport (Now Playing play/pause controls the phone's music).
+        self._phone_signal_at = 0.0
+        self._phone_tap: tuple[float, bool] | None = None  # (time, playing after tap)
         self._last_paired_refresh = 0.0
         self._paired_refresh_busy = False
         self._battery = BatteryManager()
@@ -732,9 +743,11 @@ class Api:
             self.state["media"] = {
                 "ok": has_smtc,
                 "can_seek": bool(info.get("can_seek")) and has_smtc,
-                # Prev/next work via media keys even without song metadata.
+                # Prev/next/play-pause reach the phone via media keys even without song metadata.
                 "can_prev": bool(connected_id) or bool(info.get("can_prev")),
                 "can_next": bool(connected_id) or bool(info.get("can_next")),
+                "can_play_pause": bool(connected_id),
+                "phone_playing": self._phone_playing_locked(info if info.get("ok") else None),
                 "via": info.get("via"),
             }
 
@@ -945,7 +958,8 @@ class Api:
             bt_connected = bool(self.state["bluetooth"].get("connected_id"))
         if bt_connected:
             if playing and not is_demo:
-                return self._snapshot()
+                # Live already runs for the phone: Play/Pause controls the phone's music.
+                return self.media_play_pause()
             return self.start_live()
         if playing and is_demo:
             return self.start_live()
@@ -1069,6 +1083,38 @@ class Api:
         if result.get("ok"):
             with self._lock:
                 self.state["position"] = max(0.0, float(seconds))
+        self._refresh_media()
+        with self._lock:
+            return self._snapshot()
+
+    def _phone_playing_locked(self, smtc: dict[str, Any] | None) -> bool:
+        """Is the phone's music playing? Windows' own report when there is one; otherwise
+        'audio is arriving', with a tap on Play/Pause taking effect immediately."""
+        now = time.monotonic()
+        if float(self.state.get("input_rms") or 0.0) > PHONE_SIGNAL_RMS:
+            self._phone_signal_at = now
+        tap = self._phone_tap
+        if tap is not None and now - tap[0] < PHONE_TAP_HOLD_S:
+            return tap[1]
+        if smtc is not None:
+            return bool(smtc.get("playing"))
+        return self.state.get("live_mode") == "cable" and now - self._phone_signal_at < PHONE_SIGNAL_HOLD_S
+
+    def media_play_pause(self) -> dict[str, Any]:
+        """Now Playing Play/Pause while a phone is connected: pause / resume the phone's music.
+        The vibration engine keeps running (it just gets silence while paused)."""
+        with self._lock:
+            phone = bool(self.state["bluetooth"].get("connected_id"))
+            was_playing = bool((self.state.get("media") or {}).get("phone_playing"))
+        if not phone:
+            return self.toggle_play()
+        result = self._media.play_pause()
+        with self._lock:
+            if result.get("ok"):
+                self._phone_tap = (time.monotonic(), not was_playing)
+                self.state["media_error"] = None
+            else:
+                self.state["media_error"] = "The phone didn't respond. Use play/pause on the phone."
         self._refresh_media()
         with self._lock:
             return self._snapshot()

@@ -108,6 +108,7 @@ const MockApi = (() => {
     },
     seek: async (s) => { state.position = Math.max(0, Math.min(state.track.duration, s)); return snap(); },
     previous_track: async () => { state.position = 0; return snap(); },
+    media_play_pause: async () => { state.media.phone_playing = !state.media.phone_playing; return snap(); },
     next_track: async () => { state.position = 0; if (state.live_mode !== "demo") state.track.title = "Next Track"; return snap(); },
     set_volume: async (v) => {
       state.volume = v;
@@ -329,28 +330,28 @@ function isLivePlaying(s) {
 // current positions are shown bottom-left as ready-to-paste VIZ_ZONES lines
 // and saved in localStorage. Set to false once positions are final.
 const VIZ_EDIT_MODE = false;
-const VIZ_POS_KEY = "muvi-shaker-positions-v1";
+const VIZ_POS_KEY = "muvi-shaker-positions-v2";  // v2: % of assets/figure.svg (544x767)
 
 const VIZ_ZONES = [
-  { key: "audioL", zone: "left",  x: 45.1, y: 13.8, color: "#EE82EE" },
-  { key: "audioR", zone: "right", x: 53.5, y: 13.8, color: "#EE82EE" },
-  { key: "headL",  zone: "head",  x: 45.3, y: 27.0, color: "#008000" },
-  { key: "headR",  zone: "head",  x: 52.9, y: 26.7, color: "#008000" },
-  { key: "upperL", zone: "upper", x: 45.5, y: 44.4, color: "#FFFF00" },
-  { key: "upperR", zone: "upper", x: 53.2, y: 44.3, color: "#FFFF00" },
-  { key: "midL",   zone: "mid",   x: 45.0, y: 58.9, color: "#FFA500" },
-  { key: "midR",   zone: "mid",   x: 53.5, y: 58.7, color: "#FFA500" },
-  { key: "legL",   zone: "legs",  x: 46.1, y: 80.2, color: "#FF0000" },
-  { key: "legR",   zone: "legs",  x: 53.0, y: 80.1, color: "#FF0000" },
+  { key: "audioL", zone: "left",  x: 42.4, y: 10.6, color: "#F2EFEA" },
+  { key: "audioR", zone: "right", x: 57.6, y: 10.6, color: "#F2EFEA" },
+  { key: "headL",  zone: "head",  x: 46.0, y: 22.4, color: "#E6D3B0" },
+  { key: "headR",  zone: "head",  x: 54.0, y: 22.4, color: "#E6D3B0" },
+  { key: "upperL", zone: "upper", x: 45.6, y: 32.1, color: "#D6B98F" },
+  { key: "upperR", zone: "upper", x: 54.4, y: 32.1, color: "#D6B98F" },
+  { key: "midL",   zone: "mid",   x: 45.8, y: 42.5, color: "#BC9565" },
+  { key: "midR",   zone: "mid",   x: 54.2, y: 42.5, color: "#BC9565" },
+  { key: "legL",   zone: "legs",  x: 43.0, y: 68.1, color: "#9C7748" },
+  { key: "legR",   zone: "legs",  x: 57.0, y: 68.1, color: "#9C7748" },
   // Stereo audio channels (speakers) — driven by the music itself.
  
 ];
 
 const VIB_ZONE_UI = [
-  { key: "head", label: "Head", color: "#008000" },
-  { key: "upper", label: "Upper back", color: "#FFFF00" },
-  { key: "mid", label: "Mid back", color: "#FFA500" },
-  { key: "legs", label: "Legs", color: "#FF0000" },
+  { key: "head", label: "Head", color: "#E6D3B0" },
+  { key: "upper", label: "Upper back", color: "#D6B98F" },
+  { key: "mid", label: "Mid back", color: "#BC9565" },
+  { key: "legs", label: "Legs", color: "#9C7748" },
 ];
 
 const zoneMuteOnSvg =
@@ -817,9 +818,24 @@ function renderHardwareStatus(hw, playing = false, state = null) {
   renderSettingsStatus(hw, state || lastState);
 }
 
+// Bronze fill left of the slider thumb (styles.css reads --pct).
+function syncRangeFill(input) {
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 100);
+  const pct = max > min ? ((Number(input.value) - min) / (max - min)) * 100 : 0;
+  input.style.setProperty("--pct", `${Math.max(0, Math.min(100, pct)).toFixed(2)}%`);
+}
+function syncAllRanges() {
+  document.querySelectorAll("input[type=range]").forEach(syncRangeFill);
+}
+document.addEventListener("input", (e) => {
+  if (e.target && e.target.type === "range") syncRangeFill(e.target);
+}, true);
+
 function render(s) {
   if (!s) return;
   lastState = s;
+  requestAnimationFrame(syncAllRanges);
   if (typeof renderCalibration === "function") renderCalibration(s);
   const liveOn = isLivePlaying(s);
   const demoOn = isDemoPlaying(s);
@@ -865,12 +881,14 @@ function render(s) {
     : null;
 
   const playBtn = el("playBtn");
-  // Bluetooth session owns Live — no Play/Stop while phone is connected.
-  // AUX (no BT) still uses Play/Stop manually.
+  const phoneLinked = Boolean(s.bluetooth.connected_id);
+  const phonePlaying = Boolean(s.media && s.media.phone_playing);
+  // Phone connected: Play/Pause / Back / Next control the music on the phone (Live keeps
+  // running underneath). While reconnecting the button waits. AUX: Play = Start/Stop Live.
   if (btSession) {
-    playBtn.hidden = true;
-    playBtn.disabled = true;
-    playBtn.title = "Live runs automatically while Bluetooth is connected";
+    playBtn.hidden = false;
+    playBtn.disabled = !phoneLinked || !liveOn;
+    playBtn.title = phonePlaying ? "Pause the phone" : "Play on the phone";
   } else {
     playBtn.hidden = false;
     playBtn.disabled = busy || (!liveOn && !canStartLive);
@@ -881,12 +899,25 @@ function render(s) {
   playBtn.classList.toggle("disabled", playBtn.disabled && !busy);
   playBtn.classList.toggle("busy", busy && !btSession);
   playBtn.setAttribute("aria-busy", busy && !btSession ? "true" : "false");
-  el("playIcon").innerHTML = busy ? busyIcon : (liveOn ? pauseIcon : playIconSvg);
+  el("playIcon").innerHTML = busy && !btSession
+    ? busyIcon
+    : ((btSession ? phonePlaying : liveOn) ? pauseIcon : playIconSvg);
+  const source = el("npSource");
+  if (source) {
+    const phoneName = connected ? connected.name : "";
+    source.textContent = btSession
+      ? (phoneName ? `Bluetooth · ${phoneName}` : "Bluetooth")
+      : (liveOn ? "AUX" : "");
+  }
+  const howto = el("howto");
+  if (howto) howto.hidden = btSession || liveOn;
 
   const hint = el("liveHint");
   if (hint) {
-    if (btSession && liveOn) {
-      hint.textContent = "Bluetooth Live — playing until you disconnect";
+    if (btSession && s.media_error) {
+      hint.textContent = s.media_error;
+    } else if (btSession && liveOn) {
+      hint.textContent = "";
     } else if (btSession && busy) {
       hint.textContent = "Starting Bluetooth Live…";
     } else if (btSession && s.engine_error) {
@@ -1342,8 +1373,17 @@ function wire() {
 
   el("playBtn").addEventListener("click", async () => {
     if (playClickLock) return;
-    // Bluetooth session owns Live — Play/Stop not used while phone is connected.
-    if (lastState.bluetooth && lastState.bluetooth.connected_id) return;
+    // Phone connected: pause / resume the music on the phone.
+    if (lastState.bluetooth && lastState.bluetooth.connected_id) {
+      if (el("playBtn").disabled || !api.media_play_pause) return;
+      playClickLock = true;
+      try {
+        render(await api.media_play_pause());
+      } finally {
+        playClickLock = false;
+      }
+      return;
+    }
     const wasPlaying = Boolean(lastState.playing);
     const inputReady = Boolean(lastState.live_input && lastState.live_input.ready);
     if (!wasPlaying && !inputReady) return;

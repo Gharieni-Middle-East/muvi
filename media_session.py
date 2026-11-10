@@ -86,6 +86,7 @@ def _send_media_key(vk: int) -> bool:
 
 VK_MEDIA_NEXT_TRACK = 0xB0
 VK_MEDIA_PREV_TRACK = 0xB1
+VK_MEDIA_PLAY_PAUSE = 0xB3
 
 
 class MediaSessionService:
@@ -352,6 +353,10 @@ class MediaSessionService:
     def next(self) -> dict[str, Any]:
         return self._transport("next")
 
+    def play_pause(self) -> dict[str, Any]:
+        """Play / pause the music on the connected phone (AVRCP via Windows)."""
+        return self._transport("play_pause")
+
     def _transport(self, action: str) -> dict[str, Any]:
         if self._smtc_usable:
             try:
@@ -360,8 +365,13 @@ class MediaSessionService:
                     return {"ok": True, "via": "smtc"}
             except Exception as exc:  # noqa: BLE001
                 print(f"[media_session] SMTC {action} failed: {exc}")
+        print(f"[media_session] {action}: no Windows media session - sending media key")
 
-        vk = VK_MEDIA_PREV_TRACK if action == "previous" else VK_MEDIA_NEXT_TRACK
+        vk = {
+            "previous": VK_MEDIA_PREV_TRACK,
+            "next": VK_MEDIA_NEXT_TRACK,
+            "play_pause": VK_MEDIA_PLAY_PAUSE,
+        }[action]
         key_ok = _send_media_key(vk)
         return {"ok": key_ok, "via": "media_key" if key_ok else None}
 
@@ -373,4 +383,6 @@ class MediaSessionService:
             return bool(await session.try_skip_previous_async())
         if action == "next":
             return bool(await session.try_skip_next_async())
+        if action == "play_pause":
+            return bool(await session.try_toggle_play_pause_async())
         return False
