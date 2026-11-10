@@ -333,25 +333,25 @@ const VIZ_EDIT_MODE = false;
 const VIZ_POS_KEY = "muvi-shaker-positions-v2";  // v2: % of assets/bed.png (544x767)
 
 const VIZ_ZONES = [
-  { key: "audioL", zone: "left",  x: 39.6, y: 13.8, color: "#F2EFEA" },
-  { key: "audioR", zone: "right", x: 57.4, y: 13.8, color: "#F2EFEA" },
-  { key: "headL",  zone: "head",  x: 40.1, y: 27.0, color: "#E6D3B0" },
-  { key: "headR",  zone: "head",  x: 56.1, y: 26.7, color: "#E6D3B0" },
-  { key: "upperL", zone: "upper", x: 40.5, y: 44.4, color: "#D6B98F" },
-  { key: "upperR", zone: "upper", x: 56.8, y: 44.3, color: "#D6B98F" },
-  { key: "midL",   zone: "mid",   x: 39.4, y: 58.9, color: "#BC9565" },
-  { key: "midR",   zone: "mid",   x: 57.4, y: 58.7, color: "#BC9565" },
-  { key: "legL",   zone: "legs",  x: 41.8, y: 80.2, color: "#9C7748" },
-  { key: "legR",   zone: "legs",  x: 56.3, y: 80.1, color: "#9C7748" },
+  { key: "audioL", zone: "left",  x: 39.6, y: 13.8, color: "#EE82EE" },
+  { key: "audioR", zone: "right", x: 57.4, y: 13.8, color: "#EE82EE" },
+  { key: "headL",  zone: "head",  x: 40.1, y: 27.0, color: "#008000" },
+  { key: "headR",  zone: "head",  x: 56.1, y: 26.7, color: "#008000" },
+  { key: "upperL", zone: "upper", x: 40.5, y: 44.4, color: "#FFFF00" },
+  { key: "upperR", zone: "upper", x: 56.8, y: 44.3, color: "#FFFF00" },
+  { key: "midL",   zone: "mid",   x: 39.4, y: 58.9, color: "#FFA500" },
+  { key: "midR",   zone: "mid",   x: 57.4, y: 58.7, color: "#FFA500" },
+  { key: "legL",   zone: "legs",  x: 41.8, y: 80.2, color: "#FF0000" },
+  { key: "legR",   zone: "legs",  x: 56.3, y: 80.1, color: "#FF0000" },
   // Stereo audio channels (speakers) — driven by the music itself.
  
 ];
 
 const VIB_ZONE_UI = [
-  { key: "head", label: "Head", color: "#E6D3B0" },
-  { key: "upper", label: "Upper back", color: "#D6B98F" },
-  { key: "mid", label: "Mid back", color: "#BC9565" },
-  { key: "legs", label: "Legs", color: "#9C7748" },
+  { key: "head", label: "Head", color: "#008000" },
+  { key: "upper", label: "Upper back", color: "#FFFF00" },
+  { key: "mid", label: "Mid back", color: "#FFA500" },
+  { key: "legs", label: "Legs", color: "#FF0000" },
 ];
 
 const zoneMuteOnSvg =
