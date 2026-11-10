@@ -9,3 +9,6 @@ release/
 
 # per-tablet haptics calibration (saved by the app)
 haptics_calibration.json
+
+# set while the app keeps Wi-Fi off for a Bluetooth phone
+wifi_off_for_bluetooth.flag

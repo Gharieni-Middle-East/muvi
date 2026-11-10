@@ -173,12 +173,36 @@ function renderWifiRadio(w) {
     : w.radio_switching || wifiRadioPending !== null
       ? (on ? "Turning Wi-Fi on…" : "Turning Wi-Fi off…")
       : w.radio_on === false
-        ? "Off. Bluetooth has the radio to itself. Updates need Wi-Fi."
-        : "On. Turn off to test whether Wi-Fi disturbs the Bluetooth audio.";
+        ? w.phone_active
+          ? "Off while a phone is connected, so the Bluetooth music doesn't break up."
+          : w.off_for_bluetooth
+            ? "Off. Turns back on by itself shortly after the phone disconnects."
+            : "Off. Updates need Wi-Fi."
+        : w.phone_active
+          ? "Turning off while a phone is connected…"
+          : "On. Turns off by itself while a phone is connected over Bluetooth.";
 }
 
 async function onWifiRadioToggle(e) {
-  wifiRadioPending = Boolean(e.target.checked);
+  const wantOn = Boolean(e.target.checked);
+  const w = lastWifi || {};
+  if (wantOn && w.phone_active) {
+    // Wi-Fi stays off while a phone uses Bluetooth: ask to disconnect the phone first.
+    e.target.checked = false;
+    const choice = await showDialog({
+      title: "Disconnect your phone first",
+      text: "Wi-Fi stays off while a phone is connected, because Wi-Fi makes the Bluetooth music "
+        + "break up. Disconnect the phone to turn Wi-Fi on.",
+      buttons: [
+        { label: "Cancel", value: "cancel" },
+        { label: "Disconnect phone", value: "disconnect", primary: true },
+      ],
+    });
+    if (choice !== "disconnect") return;
+    render(await api.disconnect_device());
+    e.target.checked = true;
+  }
+  wifiRadioPending = wantOn;
   wifiRadioSawBusy = false;
   wifiPasswordFor = null;
   try {
@@ -389,7 +413,7 @@ window.addEventListener("DOMContentLoaded", () => {
     available: true, scanning: false, scanned: false, networks: [], current_ssid: "",
     internet: "none", internet_text: "No internet access", connecting_ssid: null,
     disconnecting: false, message: "", message_kind: "info", error_ssid: null,
-    radio_on: true, radio_switching: false,
+    radio_on: true, radio_switching: false, phone_active: false, off_for_bluetooth: false,
   };
   const NETS = [
     { ssid: "Gharieni Office", bars: 4, secured: true, enterprise: false, saved: true, connected: false },

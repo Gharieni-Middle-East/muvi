@@ -42,6 +42,22 @@ from wifi_service import WifiService
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
+# Wi-Fi and Bluetooth share one radio chip on the tablet, and Wi-Fi traffic makes the Bluetooth
+# music choppy. So Wi-Fi is kept off while a phone is pairing, connecting or connected, and comes
+# back WIFI_RESTORE_DELAY_S after the phone has gone (only if the app was the one that turned it off).
+WIFI_RESTORE_DELAY_S = 15.0
+WIFI_RETRY_S = 10.0  # don't hammer Windows if it refuses a radio change
+WIFI_FLAG_NAME = "wifi_off_for_bluetooth.flag"
+
+
+def _wifi_flag_path() -> str:
+    """Marker that the app switched Wi-Fi off, so a crash or restart can't leave the tablet offline.
+    Lives outside the app folder (replaced on every update), next to haptics_calibration.json."""
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(sys.executable))), WIFI_FLAG_NAME)
+    return os.path.join(BASE_DIR, WIFI_FLAG_NAME)
+
+
 # Set True to open the app fullscreen on the Windows tablet.
 FULLSCREEN = True
 
@@ -142,6 +158,10 @@ class Api:
         }
         self._live_started_at: float | None = None
         self._cal_started_engine = False  # calibration opened the outputs itself (silent)
+        # Wi-Fi off while a phone uses Bluetooth (see WIFI_RESTORE_DELAY_S).
+        self._wifi_off_for_bt = os.path.exists(_wifi_flag_path())  # survives a crash/restart
+        self._wifi_restore_at: float | None = None
+        self._wifi_policy_try_at = 0.0
         self._cal_keepalive_at = 0.0
         self._bt_autostart_at: float = 0.0
         self._last_paired_refresh = 0.0
@@ -185,6 +205,7 @@ class Api:
     def get_state(self) -> dict[str, Any]:
         self._keep_calibration_tone_alive()
         self._refresh_bluetooth_link()
+        self._apply_wifi_policy()
         self._refresh_media()
         with self._lock:
             if self.state["playing"] and self._engine.available:
@@ -455,6 +476,8 @@ class Api:
         snap["update"] = self._updater.snapshot()
         snap["update_notice"] = self._update_notice
         snap["wifi"] = self._wifi.snapshot()
+        snap["wifi"]["phone_active"] = self._phone_active_locked()
+        snap["wifi"]["off_for_bluetooth"] = bool(self._wifi_off_for_bt)
         cal = self.state["haptic_cal"]
         snap["haptic_cal"] = {
             "master_gain_db": cal["master_gain_db"],
@@ -1402,10 +1425,81 @@ class Api:
         return self.get_state()
 
     def wifi_set_radio(self, on: bool) -> dict[str, Any]:
-        """Wi-Fi on/off switch (Wi-Fi screen). Bluetooth is not affected."""
+        """Wi-Fi on/off switch (Wi-Fi screen). Bluetooth is not affected.
+
+        While a phone is pairing, connecting or connected, Wi-Fi stays off: turning it on is
+        refused (the UI asks the user to disconnect the phone first)."""
+        with self._lock:
+            if on and self._phone_active_locked():
+                return self._snapshot()
+            if on:
+                # The user wants it on now: no pending automatic restore needed any more.
+                self._set_wifi_off_for_bt(False)
+                self._wifi_restore_at = None
         self._wifi.set_radio(bool(on))
         with self._lock:
             return self._snapshot()
+
+    # ------------------------------------------------- Wi-Fi off during Bluetooth --
+    def _phone_active_locked(self) -> bool:
+        bt = self.state["bluetooth"]
+        return bool(bt.get("connected_id") or bt.get("connecting_id") or bt.get("pairing_id"))
+
+    def _set_wifi_off_for_bt(self, value: bool) -> None:
+        self._wifi_off_for_bt = value
+        path = _wifi_flag_path()
+        try:
+            if value:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(str(os.getpid()))
+            elif os.path.exists(path):
+                os.remove(path)
+        except OSError as exc:
+            print(f"[app] could not update {path}: {exc}")
+
+    def _apply_wifi_policy(self) -> None:
+        """Runs on every poll; only acts when something changed.
+
+        Phone active and Wi-Fi on  -> switch Wi-Fi off (also if it was turned on in Windows
+                                      quick settings meanwhile).
+        Phone gone and the app had turned Wi-Fi off -> switch it back on after the grace period.
+        """
+        now = time.monotonic()
+        with self._lock:
+            phone = self._phone_active_locked()
+        w = self._wifi.state
+        if not w.get("available") or w.get("radio_switching"):
+            return
+        radio_on = w.get("radio_on")  # True / False / None (not known yet)
+
+        if phone:
+            self._wifi_restore_at = None
+            if radio_on is True and now >= self._wifi_policy_try_at:
+                self._wifi_policy_try_at = now + WIFI_RETRY_S
+                with self._lock:
+                    self._set_wifi_off_for_bt(True)
+                print("[app] phone using Bluetooth - switching Wi-Fi off")
+                self._wifi.set_radio(False)
+            return
+
+        if not self._wifi_off_for_bt:
+            return
+        if radio_on is True:          # already back on (e.g. by the user in Windows)
+            with self._lock:
+                self._set_wifi_off_for_bt(False)
+            self._wifi_restore_at = None
+            return
+        if radio_on is None:          # state not read yet after start-up
+            return
+        if self._wifi_restore_at is None:
+            self._wifi_restore_at = now + WIFI_RESTORE_DELAY_S
+            return
+        if now >= self._wifi_restore_at and now >= self._wifi_policy_try_at:
+            # Keep the marker until the radio is really on (cleared above), so a refused
+            # attempt is retried every WIFI_RETRY_S.
+            self._wifi_policy_try_at = now + WIFI_RETRY_S
+            print("[app] no phone on Bluetooth any more - switching Wi-Fi back on")
+            self._wifi.set_radio(True)
 
     def wifi_disconnect(self) -> dict[str, Any]:
         self._wifi.disconnect()
