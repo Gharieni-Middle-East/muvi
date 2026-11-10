@@ -15,6 +15,13 @@ from typing import Any
 _JSON_OUT = sys.stdout
 sys.stdout = sys.stderr
 
+# The windowed exe has no console: without this every engine message was thrown away.
+from app_log import open_log_file  # noqa: E402
+
+_LOG = open_log_file("engine.log")
+if _LOG is not None:
+    sys.stdout = sys.stderr = _LOG
+
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
@@ -42,6 +49,8 @@ from live_audio import (  # noqa: E402
     set_zone_enabled,
     start_live_audio,
     stop_live_audio,
+    streams_ok,
+    underrun_counts,
 )
 
 
@@ -205,7 +214,15 @@ def main() -> int:
                 _reply({"ok": True, **settings})
 
             elif cmd == "stats":
-                _reply({"ok": True, "stats": get_runtime_stats(), "running": is_active()})
+                alive, why = streams_ok()
+                _reply({
+                    "ok": True,
+                    "stats": get_runtime_stats(),
+                    "running": is_active(),
+                    "streams_ok": alive,
+                    "streams_error": why,
+                    "underruns": underrun_counts(),
+                })
 
             elif cmd == "quit":
                 stop_live_audio()

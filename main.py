@@ -6,6 +6,7 @@ Bluetooth Connect opens AudioPlaybackConnection (replaces APC).
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -49,13 +50,70 @@ WIFI_RESTORE_DELAY_S = 15.0
 WIFI_RETRY_S = 10.0  # don't hammer Windows if it refuses a radio change
 WIFI_FLAG_NAME = "wifi_off_for_bluetooth.flag"
 
+# Bluetooth link handling.
+BT_STATUS_ERRORS_LOST = 3     # failed status checks in a row before a phone counts as gone
+BT_WAIT_ACCEPT_S = 45.0       # phone hasn't accepted the audio link yet: keep asking this long
+BT_RECONNECT_S = 120.0        # link dropped: try to get the same phone back this long
+BT_REOPEN_EVERY_S = 10.0      # how often to re-open the link while waiting / reconnecting
+BT_IDLE_ENGINE_STOP_S = 300.0  # Bluetooth Live keeps the Gigaports open this long without a phone
+# Automatic (re)start of Live: first retry after 2 s, doubling up to 30 s.
+LIVE_RETRY_MIN_S = 2.0
+LIVE_RETRY_MAX_S = 30.0
+
+# User settings that survive a restart (volume, vibration, ...). Calibration has its own file.
+SETTINGS_NAME = "muvi_settings.json"
+SETTINGS_SAVE_EVERY_S = 2.0
+_SETTINGS_KEYS = (
+    "volume", "vibration", "cutoff_hz", "vibration_mode", "speaker_route",
+    "zone_enabled", "gigaport_roles_flipped",
+)
+
+
+def _launcher_file(name: str) -> str:
+    """A file outside the app folder (replaced on every update), next to haptics_calibration.json:
+    C:\\kiosk_launcher\\<name> on the tablet, the source folder when running from source."""
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(sys.executable))), name)
+    return os.path.join(BASE_DIR, name)
+
 
 def _wifi_flag_path() -> str:
-    """Marker that the app switched Wi-Fi off, so a crash or restart can't leave the tablet offline.
-    Lives outside the app folder (replaced on every update), next to haptics_calibration.json."""
-    if getattr(sys, "frozen", False):
-        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(sys.executable))), WIFI_FLAG_NAME)
-    return os.path.join(BASE_DIR, WIFI_FLAG_NAME)
+    """Marker that the app switched Wi-Fi off, so a crash or restart can't leave the tablet offline."""
+    return _launcher_file(WIFI_FLAG_NAME)
+
+
+def _load_settings() -> dict[str, Any]:
+    """Saved user settings, validated. Anything missing or broken falls back to the defaults."""
+    try:
+        with open(_launcher_file(SETTINGS_NAME), encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+
+    def _num(key: str, lo: float, hi: float) -> None:
+        try:
+            out[key] = max(lo, min(hi, float(raw[key])))
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    _num("volume", 0.0, 1.0)
+    _num("vibration", 0.0, 1.0)
+    _num("cutoff_hz", 40.0, 250.0)
+    if raw.get("vibration_mode") in ("haptics", "zones", "stereo"):
+        out["vibration_mode"] = raw["vibration_mode"]
+    if raw.get("speaker_route") in ("headphones", "secondary"):
+        out["speaker_route"] = raw["speaker_route"]
+    zones = raw.get("zone_enabled")
+    if isinstance(zones, dict):
+        out["zone_enabled"] = {
+            z: bool(zones.get(z, True)) for z in ("head", "upper", "mid", "legs")
+        }
+    if isinstance(raw.get("gigaport_roles_flipped"), bool):
+        out["gigaport_roles_flipped"] = raw["gigaport_roles_flipped"]
+    return out
 
 
 # Set True to open the app fullscreen on the Windows tablet.
@@ -97,6 +155,13 @@ class Api:
                 "scanning": False,
                 "discovering": False,
                 "pairing_id": None,
+                # 'confirm' while the phone shows the pairing prompt, 'audio' while the new
+                # phone's audio connection is looked up (then it connects by itself).
+                "pair_stage": None,
+                # Phone whose audio link isn't open: kind 'accept' = phone hasn't accepted it
+                # yet, 'reconnect' = it dropped and the app is getting it back.
+                "waiting_id": None,
+                "waiting_kind": None,
                 "forgetting": False,
                 "error": None,
                 "alert": None,
@@ -139,6 +204,16 @@ class Api:
             "calibrating": None,  # Gigaport channel 1-8 playing the calibration tone, or None
             "calibration_busy": False,
         }
+        # Saved user settings (volume, vibration, modes, roles) from the last session.
+        saved = _load_settings()
+        self.state.update(saved)
+        self.state["highpass_hz"] = self.state["cutoff_hz"]
+        self.state["audio_muted"] = self.state["volume"] <= 0.0
+        self.state["vibration_muted"] = self.state["vibration"] <= 0.0
+        if saved:
+            print(f"[app] restored settings: {sorted(saved)}")
+        self._settings_dirty = False
+        self._settings_saved_at = 0.0
         self._bt = BluetoothAudioService()
         self._media = MediaSessionService()
         # Real paired devices only — no mock phones in the list.
@@ -163,7 +238,19 @@ class Api:
         self._wifi_restore_at: float | None = None
         self._wifi_policy_try_at = 0.0
         self._cal_keepalive_at = 0.0
-        self._bt_autostart_at: float = 0.0
+        # Automatic Live start (Bluetooth session / recovery after a crash or unplug).
+        self._live_retry_at = 0.0
+        self._live_retry_delay = LIVE_RETRY_MIN_S
+        self._live_recover = False   # AUX Live stopped by a fault: start it again
+        self._autostart_busy = False
+        self._last_stats: dict[str, float] = {}
+        # Bluetooth link bookkeeping (see _refresh_bluetooth_link).
+        self._bt_status_errors = 0
+        self._bt_wait_deadline = 0.0
+        self._bt_wait_check_at = 0.0
+        self._bt_reopen_at = 0.0
+        self._bt_reopen_busy = False
+        self._bt_idle_since: float | None = None
         self._last_paired_refresh = 0.0
         self._paired_refresh_busy = False
         self._battery = BatteryManager()
@@ -205,11 +292,14 @@ class Api:
     def get_state(self) -> dict[str, Any]:
         self._keep_calibration_tone_alive()
         self._refresh_bluetooth_link()
+        self._check_engine_health()
+        self._maybe_autostart_live()
         self._apply_wifi_policy()
         self._refresh_media()
+        self._maybe_save_settings()
         with self._lock:
             if self.state["playing"] and self._engine.available:
-                stats = self._engine.get_runtime_stats()
+                stats = self._last_stats
                 self.state["input_rms"] = float(stats.get("input_rms", 0.0))
                 # One signal per shaker row (head, upper back, mid back, legs)
                 # plus the stereo audio channels (left, right).
@@ -301,12 +391,13 @@ class Api:
             try:
                 devices = self._bt.list_devices()
                 with self._lock:
-                    connected_id = self.state["bluetooth"].get("connected_id")
+                    bt = self.state["bluetooth"]
+                    keep = {bt.get("connected_id"), bt.get("waiting_id")} - {None}
                     by_id = {d["id"]: d for d in devices}
-                    if connected_id:
-                        for d in self._devices:
-                            if d.get("id") == connected_id and connected_id not in by_id:
-                                by_id[connected_id] = d
+                    for d in self._devices:
+                        # Keep the live phone's entry (and its Connected / Reconnecting label).
+                        if d.get("id") in keep:
+                            by_id[d["id"]] = d
                     self._devices = list(by_id.values())
             except Exception as exc:  # noqa: BLE001
                 print(f"[app] paired refresh failed: {exc}")
@@ -317,56 +408,283 @@ class Api:
         threading.Thread(target=_work, daemon=True, name="bt-paired-refresh").start()
 
     def _refresh_bluetooth_link(self) -> None:
-        """Clear stale 'connected' when phone drops or Windows Bluetooth is off.
+        """Track the phone's audio link on every poll.
 
-        While BT stays connected, keep Live running (no Play/Stop needed).
+        connected  -> Live runs (started by _maybe_autostart_live).
+        dropped    -> 'Reconnecting…': the link object is kept and re-opened every
+                      BT_REOPEN_EVERY_S for BT_RECONNECT_S; the engine keeps running so the
+                      music comes straight back.
+        not accepted yet -> 'Waiting for phone…' (same retry, BT_WAIT_ACCEPT_S).
+        A single failed status check no longer counts as a disconnect.
         """
         with self._lock:
-            connected_id = self.state["bluetooth"].get("connected_id")
-            connecting = self.state["bluetooth"].get("connecting_id")
+            bt = self.state["bluetooth"]
+            connected_id = bt.get("connected_id")
+            connecting = bt.get("connecting_id")
+            waiting_id = bt.get("waiting_id")
+            playing = bool(self.state.get("playing"))
             live_mode = self.state.get("live_mode")
-            playing = self.state.get("playing")
-            play_busy = self.state.get("play_busy")
-        if not connected_id or connecting:
+        if connecting:
+            return
+        now = time.monotonic()
+
+        if connected_id:
+            status = self._bt.get_status(connected_id)
+            if status.get("connected"):
+                self._bt_status_errors = 0
+                return
+            reason = status.get("reason") or "disconnected"
+            if reason == "error":
+                # A slow / failed WinRT call is not a disconnect: give it a few polls.
+                self._bt_status_errors += 1
+                if self._bt_status_errors < BT_STATUS_ERRORS_LOST:
+                    return
+            self._bt_status_errors = 0
+            message = status.get("message") or "Bluetooth disconnected"
+            print(f"[app] Bluetooth link lost ({reason}): {message}")
+            if reason in ("closed", "waiting", "error"):
+                self._start_bt_waiting(connected_id, "reconnect", from_connected=True)
+            else:
+                self._bt_link_gone(connected_id, message)
             return
 
-        status = self._bt.get_status(connected_id)
-        if status.get("connected"):
-            # BT session owns Live — auto-start / recover if not already on cable.
-            needs_live = (not playing) or (live_mode == "demo")
-            if needs_live and not play_busy:
-                now = time.monotonic()
-                if now - self._bt_autostart_at >= 2.0:
-                    self._bt_autostart_at = now
-                    try:
-                        print("[app] Bluetooth connected — starting Live")
-                        self.start_live()
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[app] BT auto-start Live failed: {exc}")
+        if waiting_id:
+            if now < self._bt_wait_check_at:
+                return
+            self._bt_wait_check_at = now + 2.0
+            status = self._bt.get_status(waiting_id)
+            if status.get("connected"):
+                print("[app] Bluetooth audio link open again")
+                self._adopt_bt_connection(waiting_id)
+                return
+            reason = status.get("reason") or "disconnected"
+            if reason in ("bluetooth_off", "device_gone", "no_connection", "state_error"):
+                self._bt_link_gone(waiting_id, status.get("message") or "Phone disconnected")
+                return
+            if now >= self._bt_wait_deadline:
+                with self._lock:
+                    kind = self.state["bluetooth"].get("waiting_kind")
+                msg = (
+                    "The phone didn't accept the audio connection. On the phone, choose this "
+                    "tablet as the audio device (or tap Connect again)."
+                    if kind == "accept"
+                    else "The phone didn't come back. Tap Connect to reconnect it."
+                )
+                print(f"[app] giving up on Bluetooth phone ({kind})")
+                try:
+                    self._bt.disconnect(waiting_id, forget=False)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[app] bt disconnect after timeout: {exc}")
+                self._bt_link_gone(waiting_id, msg)
+                return
+            if now >= self._bt_reopen_at and not self._bt_reopen_busy:
+                self._bt_reopen_at = now + BT_REOPEN_EVERY_S
+                self._bt_reopen_busy = True
+                threading.Thread(
+                    target=self._bt_reopen_worker, args=(waiting_id,), daemon=True, name="bt-reopen"
+                ).start()
             return
 
-        reason = status.get("reason") or "disconnected"
-        message = status.get("message") or "Bluetooth disconnected"
-        print(f"[app] Bluetooth link lost ({reason}): {message}")
-
-        # Drop app-side connection; stop Live if we were on the BT/CABLE path.
+        # No phone at all. Bluetooth Live keeps the Gigaports open for a while (a phone that
+        # comes back plays instantly), then lets them go.
         if playing and live_mode == "cable":
-            try:
-                self._engine.stop_live()
-            except Exception as exc:  # noqa: BLE001
-                print(f"[app] stop live after BT drop: {exc}")
+            if self._bt_idle_since is None:
+                self._bt_idle_since = now
+            elif now - self._bt_idle_since >= BT_IDLE_ENGINE_STOP_S:
+                print("[app] no phone for 5 min - stopping Bluetooth Live")
+                self._bt_idle_since = None
+                self.stop_live()
+        else:
+            self._bt_idle_since = None
 
+    def _start_bt_waiting(self, device_id: str, kind: str, *, from_connected: bool = False) -> None:
+        """Show 'Waiting for phone…' / 'Reconnecting…' and retry opening the link."""
+        now = time.monotonic()
+        self._bt_wait_deadline = now + (BT_RECONNECT_S if kind == "reconnect" else BT_WAIT_ACCEPT_S)
+        self._bt_wait_check_at = now + 2.0
+        # A dropped link: give the phone a moment to come back by itself before re-opening.
+        self._bt_reopen_at = now + (3.0 if from_connected else BT_REOPEN_EVERY_S)
         with self._lock:
-            self.state["bluetooth"]["connected_id"] = None
-            self.state["bluetooth"]["connecting_id"] = None
-            self.state["bluetooth"]["error"] = message
-            if playing and live_mode == "cable":
-                self.state["playing"] = False
-                self.state["input_rms"] = 0.0
+            bt = self.state["bluetooth"]
+            bt["connected_id"] = None
+            bt["waiting_id"] = device_id
+            bt["waiting_kind"] = kind
+            bt["error"] = (
+                "Phone disconnected - reconnecting… Keep the phone close."
+                if kind == "reconnect"
+                else "Waiting for the phone… If it asks, allow the audio connection on the phone."
+            )
+            for d in self._devices:
+                if d.get("id") == device_id:
+                    d["profile"] = "Reconnecting…" if kind == "reconnect" else "Waiting for phone…"
+
+    def _adopt_bt_connection(self, device_id: str) -> None:
+        with self._lock:
+            bt = self.state["bluetooth"]
+            bt["connected_id"] = device_id
+            bt["waiting_id"] = None
+            bt["waiting_kind"] = None
+            bt["error"] = None
+            self._mark_device_connected_locked(device_id)
+        self._bt_status_errors = 0
+        self._bt_idle_since = None
+        self._live_retry_at = 0.0  # start / keep Live right away
+
+    def _bt_link_gone(self, device_id: str, message: str) -> None:
+        """Phone gone for good (Bluetooth off, unpaired, or it didn't come back)."""
+        with self._lock:
+            bt = self.state["bluetooth"]
+            if bt.get("connected_id") == device_id:
+                bt["connected_id"] = None
+            if bt.get("waiting_id") == device_id:
+                bt["waiting_id"] = None
+                bt["waiting_kind"] = None
+            bt["error"] = message
+            for d in self._devices:
+                if d.get("id") == device_id:
+                    d["profile"] = "Paired - tap Connect"
+                    d["audio_ready"] = False
+        self._bt_idle_since = time.monotonic()
+        self._schedule_paired_refresh(force=True)
+
+    def _mark_device_connected_locked(self, device_id: str, old_id: str | None = None) -> None:
+        for d in self._devices:
+            if d.get("id") in (device_id, old_id):
+                d["id"] = device_id
+                d["paired"] = True
+                d["audio_ready"] = True
+                d["profile"] = "Connected · Audio ready"
+
+    def _bt_reopen_worker(self, device_id: str) -> None:
+        try:
+            result = self._bt.connect(device_id)
+            print(f"[app] re-open Bluetooth link: {result.get('status') or result.get('error')}")
+            if result.get("ok"):
+                with self._lock:
+                    still = self.state["bluetooth"].get("waiting_id") == device_id
+                if still:
+                    self._adopt_bt_connection(str(result.get("device_id") or device_id))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[app] re-open Bluetooth link failed: {exc}")
+        finally:
+            self._bt_reopen_busy = False
+
+    # ------------------------------------------------- engine health / auto Live --
+    def _check_engine_health(self) -> None:
+        """Notice a crashed engine or a device that stopped (Gigaport unplugged) instead of
+        showing 'playing' forever with no sound. Live is then restarted with backoff."""
+        with self._lock:
+            playing = bool(self.state.get("playing"))
+            live_mode = self.state.get("live_mode")
+            busy = bool(self.state.get("play_busy") or self.state.get("calibration_busy"))
+        active = playing or live_mode == "calibration"
+        if not active or busy or not self._engine.available:
+            self._last_stats = {}
+            return
+        health = self._engine.health()
+        if health.get("running") and health.get("streams_ok", True):
+            self._last_stats = dict(health.get("stats") or {})
+            return
+        if not health.get("crashed") and "streams_ok" not in health and not playing:
+            # Calibration engine already closed elsewhere: just tidy up, no error.
+            with self._lock:
+                self.state["calibrating"] = None
                 self.state["live_mode"] = None
-                self._live_started_at = None
-            # Drop vanished device from list so UI doesn't keep showing it as connected.
-            self._devices = [d for d in self._devices if d.get("id") != connected_id]
+                self._cal_started_engine = False
+            return
+        if health.get("streams_ok") is False:
+            why = (
+                f"An audio device stopped ({health.get('error') or 'no response'}). "
+                "Check that both Gigaports are plugged in."
+            )
+        else:
+            why = health.get("error") or "The audio engine stopped."
+        print(f"[app] engine fault in {live_mode}: {why}")
+        try:
+            self._engine.stop_live()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[app] stop after engine fault: {exc}")
+        now = time.monotonic()
+        with self._lock:
+            self._last_stats = {}
+            self.state["playing"] = False
+            self.state["input_rms"] = 0.0
+            self.state["live_mode"] = None
+            self._live_started_at = None
+            if live_mode in ("cable", "aux"):
+                self.state["engine_error"] = why + " Restarting…"
+                # Bluetooth Live comes back by itself while the phone is connected; AUX needs this.
+                self._live_recover = live_mode == "aux"
+                self._live_retry_at = now + self._live_retry_delay
+            elif live_mode == "demo":
+                self.state["engine_error"] = why
+                self.state["demo"]["error"] = why
+            elif live_mode == "calibration":
+                self.state["calibrating"] = None
+                self.state["haptic_cal_error"] = why
+                self._cal_started_engine = False
+
+    def _maybe_autostart_live(self) -> None:
+        """Start Live when a phone is connected (or an AUX session must recover). Runs in a
+        thread so the UI poll never waits for the Gigaports; retries back off 2 s → 30 s."""
+        with self._lock:
+            bt = self.state["bluetooth"]
+            phone = bool(bt.get("connected_id")) and not bt.get("connecting_id")
+            recover = self._live_recover and not bt.get("connected_id") and not bt.get("waiting_id")
+            playing = bool(self.state.get("playing"))
+            live_mode = self.state.get("live_mode")
+            busy = bool(self.state.get("play_busy") or self.state.get("calibration_busy"))
+            needs = (not playing) or live_mode == "demo"
+            if not (phone or recover) or not needs or busy or self._autostart_busy:
+                return
+            now = time.monotonic()
+            if now < self._live_retry_at:
+                return
+            self._autostart_busy = True
+
+        def _work() -> None:
+            try:
+                print("[app] starting Live " + ("(Bluetooth connected)" if phone else "(recovering)"))
+                snap = self.start_live()
+                ok = bool(snap.get("playing"))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[app] auto-start Live failed: {exc}")
+                ok = False
+            with self._lock:
+                if ok:
+                    self._live_retry_delay = LIVE_RETRY_MIN_S
+                    self._live_recover = False
+                else:
+                    self._live_retry_delay = min(LIVE_RETRY_MAX_S, self._live_retry_delay * 2)
+                    self._live_retry_at = time.monotonic() + self._live_retry_delay
+                    print(f"[app] Live didn't start - next try in {self._live_retry_delay:.0f}s")
+                self._autostart_busy = False
+
+        threading.Thread(target=_work, daemon=True, name="live-autostart").start()
+
+    # ------------------------------------------------------------- saved settings --
+    def _settings_changed(self) -> None:
+        self._settings_dirty = True
+
+    def _maybe_save_settings(self, force: bool = False) -> None:
+        if not self._settings_dirty:
+            return
+        now = time.monotonic()
+        if not force and now - self._settings_saved_at < SETTINGS_SAVE_EVERY_S:
+            return
+        self._settings_saved_at = now
+        with self._lock:
+            data = {k: self.state.get(k) for k in _SETTINGS_KEYS}
+            data["zone_enabled"] = dict(self.state.get("zone_enabled") or {})
+        path = _launcher_file(SETTINGS_NAME)
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+            os.replace(tmp, path)
+            self._settings_dirty = False
+        except OSError as exc:
+            print(f"[app] could not save settings to {path}: {exc}")
 
     def _refresh_media(self) -> None:
         """Pull SMTC metadata when Windows exposes it; else Live elapsed + device name."""
@@ -441,9 +759,17 @@ class Api:
                     self.state["track"]["title"] = "AUX Live"
                     self.state["track"]["artist"] = self.state.get("capture_name") or "Line-in"
                     self.state["track"]["album"] = ""
-                else:
+                elif connected_id:
                     self.state["track"]["title"] = "Bluetooth Live"
                     self.state["track"]["artist"] = device_name or "Phone"
+                    self.state["track"]["album"] = ""
+                else:
+                    # Bluetooth Live kept open while the phone is away (see BT_IDLE_ENGINE_STOP_S).
+                    waiting = bool(self.state["bluetooth"].get("waiting_id"))
+                    self.state["track"]["title"] = "Reconnecting…" if waiting else "Phone disconnected"
+                    self.state["track"]["artist"] = (
+                        "Keep the phone close" if waiting else "Connect a phone to play"
+                    )
                     self.state["track"]["album"] = ""
             elif connected_id:
                 self.state["position"] = 0.0
@@ -497,13 +823,21 @@ class Api:
                 return self._snapshot()
             self.state["play_busy"] = True
             was_demo = self.state.get("live_mode") == "demo" and self.state.get("playing")
+            # The silent calibration engine has the Gigaports open. It used to make the engine
+            # look "already running", so Bluetooth Live never really started.
+            was_cal = self.state.get("live_mode") == "calibration" or self._cal_started_engine
+            cal_channel = self.state.get("calibrating")
 
         try:
-            if was_demo:
+            if was_demo or was_cal:
                 try:
                     self._engine.stop_live()
                 except Exception:  # noqa: BLE001
                     pass
+                if was_cal:
+                    self._cal_started_engine = False
+                    with self._lock:
+                        self.state["live_mode"] = None
 
             if not self._engine.available:
                 with self._lock:
@@ -522,6 +856,8 @@ class Api:
                     self.state["engine_error"] = live_input.get("message")
                     self.state["playing"] = False
                     self.state["play_busy"] = False
+                    if was_cal:
+                        self.state["calibrating"] = None
                     return self._snapshot()
 
             result = self._engine.start_live(
@@ -541,6 +877,9 @@ class Api:
             if result.get("ok"):
                 self._cal_started_engine = False
                 self._push_haptic_cal()
+                if was_cal and cal_channel is not None:
+                    # Calibration sheet still open: keep the tone going on the Live engine.
+                    self._engine.haptic_test(cal_channel)
             with self._lock:
                 self.state["playing"] = bool(result.get("ok"))
                 self.state["capture_name"] = result.get("capture")
@@ -555,6 +894,8 @@ class Api:
                 else:
                     self._live_started_at = None
                     self.state["bluetooth"]["error"] = result.get("error")
+                    if was_cal:
+                        self.state["calibrating"] = None
                 self.state["play_busy"] = False
                 return self._snapshot()
         except Exception as exc:  # noqa: BLE001
@@ -571,6 +912,7 @@ class Api:
             if self.state["play_busy"]:
                 return self._snapshot()
             self.state["play_busy"] = True
+            self._live_recover = False
         try:
             self._engine.stop_live()
             with self._lock:
@@ -618,6 +960,11 @@ class Api:
                 return self._snapshot()
             self.state["play_busy"] = True
             was_live = self.state.get("playing") and self.state.get("live_mode") != "demo"
+            self._live_recover = False
+            if self.state.get("live_mode") == "calibration" or self._cal_started_engine:
+                # Demo replaces the silent calibration engine (the bridge restarts the worker).
+                self._cal_started_engine = False
+                self.state["live_mode"] = None
 
         try:
             if was_live:
@@ -753,6 +1100,7 @@ class Api:
         with self._lock:
             self.state["volume"] = vol
             self.state["audio_muted"] = mute
+            self._settings_changed()
         self._engine.set_volume(vol)
         self._engine.set_audio_muted(mute)
         with self._lock:
@@ -771,6 +1119,7 @@ class Api:
         with self._lock:
             self.state["vibration"] = vib
             self.state["vibration_muted"] = mute
+            self._settings_changed()
         self._engine.set_vibration(vib)
         self._engine.set_vibration_muted(mute)
         with self._lock:
@@ -790,6 +1139,7 @@ class Api:
                 return self._snapshot()
         with self._lock:
             self.state.setdefault("zone_enabled", {})[key] = bool(enabled)
+            self._settings_changed()
             # Turning any zone back on clears master vibration mute.
             if enabled:
                 self.state["vibration_muted"] = False
@@ -808,6 +1158,7 @@ class Api:
             hz = max(40.0, min(250.0, float(value)))
             self.state["cutoff_hz"] = hz
             self.state["highpass_hz"] = hz  # keep UI field in sync
+            self._settings_changed()
         self._engine.set_cutoff_hz(hz)
         with self._lock:
             return self._snapshot()
@@ -819,6 +1170,7 @@ class Api:
             route = "headphones"
         with self._lock:
             self.state["speaker_route"] = route
+            self._settings_changed()
         self._engine.set_speaker_route(route)
         with self._lock:
             return self._snapshot()
@@ -830,6 +1182,7 @@ class Api:
             mode = "haptics"
         with self._lock:
             self.state["vibration_mode"] = mode
+            self._settings_changed()
         self._engine.set_vibration_mode(mode)
         with self._lock:
             return self._snapshot()
@@ -1014,6 +1367,7 @@ class Api:
             self.state["vibration_output_index"] = None
             self.state["audio_output_index"] = None
             flipped = bool(self.state["gigaport_roles_flipped"])
+            self._settings_changed()
             playing = bool(self.state.get("playing"))
             live_mode = self.state.get("live_mode")
 
@@ -1094,6 +1448,12 @@ class Api:
                 or self.state["bluetooth"].get("pairing_id")
             ):
                 return self._snapshot()
+            if self._phone_active_locked():
+                # A nearby scan keeps the radio busy for up to 40 s and makes the music choppy.
+                self.state["bluetooth"]["error"] = (
+                    "Disconnect the phone first to look for other phones."
+                )
+                return self._snapshot()
             self.state["bluetooth"]["scanning"] = True
             self.state["bluetooth"]["discovering"] = True
             self.state["bluetooth"]["error"] = None
@@ -1152,17 +1512,25 @@ class Api:
         return self.scan_bluetooth()
 
     def pair_device(self, device_id: str) -> dict[str, Any]:
-        """CustomPairing CONFIRM_ONLY for a nearby unpaired phone."""
+        """Pair a nearby phone (CustomPairing CONFIRM_ONLY), then connect it straight away.
+
+        One tap: Pair -> confirm on the phone -> the app finds the phone's audio connection and
+        connects. (Before: Pair often had to be tapped twice and Connect was a third step.)
+        """
         with self._lock:
             if self.state["bluetooth"].get("pairing_id") or self.state["bluetooth"].get("connecting_id"):
                 return self._snapshot()
             self.state["bluetooth"]["pairing_id"] = device_id
+            self.state["bluetooth"]["pair_stage"] = "confirm"
             self.state["bluetooth"]["error"] = None
             snap = self._snapshot()
+        # Pairing is much slower while a nearby scan is still running.
+        self._bt.cancel_discovery()
 
         def _work() -> None:
             error: str | None = None
             alert: str | None = None
+            apc_id: str | None = None
             paired_ok = False
             try:
                 if not self._bt.available:
@@ -1178,7 +1546,10 @@ class Api:
                         ):
                             alert = error
                     else:
-                        # Refresh APC list so Connect is available immediately.
+                        with self._lock:
+                            self.state["bluetooth"]["pair_stage"] = "audio"
+                            self.state["bluetooth"]["error"] = "Paired - getting the audio connection ready…"
+                        apc_id = result.get("apc_id") or self._bt.resolve_apc_id(result.get("name"))
                         devices = self._bt.list_devices()
                         with self._lock:
                             self._devices = devices
@@ -1190,12 +1561,16 @@ class Api:
             finally:
                 with self._lock:
                     self.state["bluetooth"]["pairing_id"] = None
+                    self.state["bluetooth"]["pair_stage"] = None
                     self.state["bluetooth"]["error"] = error
                     self.state["bluetooth"]["alert"] = alert
-                    if paired_ok and not error:
+                    if paired_ok and not error and not apc_id:
                         self.state["bluetooth"]["error"] = (
-                            "Paired — tap Connect on the phone below."
+                            "Paired - tap Connect on the phone below."
                         )
+            if paired_ok and apc_id:
+                print(f"[app] paired - connecting {apc_id[-24:]}…")
+                self.connect_device(apc_id)
 
         threading.Thread(target=_work, daemon=True, name="bt-pair").start()
         return snap
@@ -1222,30 +1597,70 @@ class Api:
             return self._snapshot()
 
     def connect_device(self, device_id: str) -> dict[str, Any]:
-        """Pair if needed, then open AudioPlaybackConnection. UI shows Connecting…."""
+        """Open the phone's AudioPlaybackConnection; Live then starts by itself."""
         with self._lock:
             if self.state["bluetooth"].get("connecting_id"):
                 return self._snapshot()
-            self.state["bluetooth"]["connecting_id"] = device_id
-            self.state["bluetooth"]["error"] = None
+            bt = self.state["bluetooth"]
+            # One phone at a time: a second phone would also play into CABLE (two songs mixed).
+            previous = [i for i in (bt.get("connected_id"), bt.get("waiting_id")) if i and i != device_id]
+            bt["connecting_id"] = device_id
+            bt["error"] = None
             snap = self._snapshot()
+        self._bt.cancel_discovery()
 
         def _work() -> None:
+            for old in previous:
+                print(f"[app] switching phones - closing {old[-24:]}…")
+                try:
+                    self._bt.disconnect(old, forget=False)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[app] close previous phone: {exc}")
+            with self._lock:
+                bt = self.state["bluetooth"]
+                for old in previous:
+                    if bt.get("connected_id") == old:
+                        bt["connected_id"] = None
+                    if bt.get("waiting_id") == old:
+                        bt["waiting_id"] = None
+                        bt["waiting_kind"] = None
+                    for d in self._devices:
+                        if d.get("id") == old:
+                            d["profile"] = "Paired - tap Connect"
+                            d["audio_ready"] = False
+
+            # Phone audio goes to the Windows default playback device; it must be CABLE Input
+            # or the app hears nothing. This used to fail silently.
+            route: dict[str, Any]
             try:
                 from windows_cable import ensure_cable_default_playback
 
-                ensure_cable_default_playback()
+                route = ensure_cable_default_playback()
             except Exception as exc:  # noqa: BLE001
-                print(f"[app] cable default warn: {exc}")
+                route = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            if not route.get("ok"):
+                msg = (
+                    "Audio routing failed: "
+                    f"{route.get('error') or 'could not select CABLE Input'} "
+                    "Check that VB-Audio Virtual Cable is installed, then tap Connect again."
+                )
+                print(f"[app] {msg}")
+                with self._lock:
+                    self.state["bluetooth"]["connecting_id"] = None
+                    self.state["bluetooth"]["error"] = msg
+                return
 
             connected = False
+            waiting = False
             error: str | None = None
             resolved_id = device_id
             if self._bt.available:
                 result = self._bt.connect(device_id)
-                connected = bool(result.get("ok") or result.get("waiting"))
+                connected = bool(result.get("ok"))
+                waiting = bool(result.get("waiting")) and not connected
                 resolved_id = str(result.get("device_id") or device_id)
-                error = None if connected else (result.get("error") or "Connect failed")
+                if not connected and not waiting:
+                    error = result.get("error") or f"Connect failed ({result.get('status') or 'unknown'})"
             else:
                 error = self._bt.last_error or "Bluetooth unavailable"
 
@@ -1253,36 +1668,49 @@ class Api:
                 self.state["bluetooth"]["connecting_id"] = None
                 if connected:
                     self.state["bluetooth"]["connected_id"] = resolved_id
-                    # Refresh list entry so the connected device shows as audio-ready.
+                    self._mark_device_connected_locked(resolved_id, device_id)
+                elif not waiting:
+                    self.state["bluetooth"]["error"] = error
+                else:
                     for d in self._devices:
-                        if d.get("id") in (device_id, resolved_id):
+                        if d.get("id") == device_id:
                             d["id"] = resolved_id
-                            d["paired"] = True
-                            d["audio_ready"] = True
-                            d["profile"] = "Connected · Audio ready"
-                self.state["bluetooth"]["error"] = error
-
-            # BT session owns Live — start immediately; no Play press needed.
             if connected:
+                self._bt_status_errors = 0
+                self._bt_idle_since = None
+                print("[app] Bluetooth connected - starting Live")
                 try:
-                    time.sleep(0.35)  # let CABLE / APC settle briefly
-                    print("[app] Bluetooth connected — auto-starting Live")
                     self.start_live()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[app] BT connect auto-start Live failed: {exc}")
+            elif waiting:
+                print("[app] phone hasn't accepted the audio link yet - waiting")
+                self._start_bt_waiting(resolved_id, "accept")
 
         threading.Thread(target=_work, daemon=True, name="bt-connect").start()
         return snap
 
     def disconnect_device(self) -> dict[str, Any]:
-        """Close audio link only — keeps Windows pairing."""
+        """Close audio link only — keeps Windows pairing. Also cancels 'Reconnecting…'."""
         self.stop_live()
-        if self._bt.available:
-            self._bt.disconnect(self.state["bluetooth"].get("connected_id"), forget=False)
         with self._lock:
-            self.state["bluetooth"]["connected_id"] = None
-            self.state["bluetooth"]["connecting_id"] = None
-            self.state["bluetooth"]["error"] = None
+            bt = self.state["bluetooth"]
+            ids = [i for i in (bt.get("connected_id"), bt.get("waiting_id")) if i]
+        if self._bt.available:
+            for did in ids:
+                self._bt.disconnect(did, forget=False)
+        with self._lock:
+            bt = self.state["bluetooth"]
+            bt["connected_id"] = None
+            bt["connecting_id"] = None
+            bt["waiting_id"] = None
+            bt["waiting_kind"] = None
+            bt["error"] = None
+            for d in self._devices:
+                if d.get("id") in ids:
+                    d["profile"] = "Paired - tap Connect"
+                    d["audio_ready"] = False
+            self._bt_idle_since = None
             return self._snapshot()
 
     def forget_device(self, device_id: str | None = None) -> dict[str, Any]:
@@ -1322,6 +1750,9 @@ class Api:
                     if connected == did:
                         self.state["bluetooth"]["connected_id"] = None
                         self.state["bluetooth"]["connecting_id"] = None
+                    if self.state["bluetooth"].get("waiting_id") == did:
+                        self.state["bluetooth"]["waiting_id"] = None
+                        self.state["bluetooth"]["waiting_kind"] = None
                     self._devices = [d for d in self._devices if d.get("id") != did]
                     self._nearby = [d for d in self._nearby if d.get("id") != did]
                     self.state["bluetooth"]["error"] = (
@@ -1367,6 +1798,8 @@ class Api:
                     self.state["bluetooth"]["forgetting"] = False
                     self.state["bluetooth"]["connected_id"] = None
                     self.state["bluetooth"]["connecting_id"] = None
+                    self.state["bluetooth"]["waiting_id"] = None
+                    self.state["bluetooth"]["waiting_kind"] = None
                     self._devices = []
                     self._nearby = []
                     self.state["bluetooth"]["error"] = error
@@ -1395,6 +1828,7 @@ class Api:
 
     def _quit_for_update(self) -> None:
         """The apply script is waiting for this process to exit (called from a worker thread)."""
+        self._maybe_save_settings(force=True)
         try:
             self._engine.stop_live()
         except Exception as exc:  # noqa: BLE001
@@ -1443,7 +1877,12 @@ class Api:
     # ------------------------------------------------- Wi-Fi off during Bluetooth --
     def _phone_active_locked(self) -> bool:
         bt = self.state["bluetooth"]
-        return bool(bt.get("connected_id") or bt.get("connecting_id") or bt.get("pairing_id"))
+        return bool(
+            bt.get("connected_id")
+            or bt.get("connecting_id")
+            or bt.get("pairing_id")
+            or bt.get("waiting_id")  # waiting for / reconnecting a phone
+        )
 
     def _set_wifi_off_for_bt(self, value: bool) -> None:
         self._wifi_off_for_bt = value
@@ -1507,6 +1946,12 @@ class Api:
 
 
 def main() -> None:
+    # Packaged app has no console: keep a log in C:\\kiosk_launcher\\updates\\app.log.
+    from app_log import open_log_file
+
+    log = open_log_file("app.log")
+    if log is not None:
+        sys.stdout = sys.stderr = log
     AppWatchdog.start_if_needed()   # kiosk session only: restart the app if it closes/crashes
     api = Api()
     window = webview.create_window(
@@ -1528,6 +1973,7 @@ def main() -> None:
     window.events.loaded += _on_loaded
 
     def _on_closing() -> None:
+        api._maybe_save_settings(force=True)
         api._engine.stop_live()
         if api._bt.available:
             api._bt.disconnect(forget=False)

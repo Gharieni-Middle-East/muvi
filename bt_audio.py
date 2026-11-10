@@ -136,6 +136,8 @@ class BluetoothAudioService:
         self._nearby_progress_cb: Callable[[list[dict[str, Any]]], None] | None = None
         self._watcher_handlers: list[Any] = []
         self._pairing_handlers: list[Any] = []
+        # Set to stop a running nearby scan early (Bluetooth inquiry disturbs a live audio link).
+        self._discovery_cancel = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         if self.available:
@@ -197,7 +199,8 @@ class BluetoothAudioService:
             self.last_error = None
             self._nearby_progress_cb = progress_cb
             self._partial_nearby = []
-            return self._run(self._discover_nearby(), timeout=55.0)
+            self._discovery_cancel.clear()
+            return self._run(self._discover_nearby(), timeout=50.0)
         except Exception as exc:  # noqa: BLE001
             self.last_error = f"{type(exc).__name__}: {exc}"
             print("[bt_audio] discover_nearby failed:")
@@ -205,6 +208,20 @@ class BluetoothAudioService:
             return list(self._partial_nearby)
         finally:
             self._nearby_progress_cb = None
+
+    def cancel_discovery(self) -> None:
+        """Stop a running nearby scan at its next 1 s step (before pairing / connecting)."""
+        self._discovery_cancel.set()
+
+    def resolve_apc_id(self, name: str | None) -> str | None:
+        """Audio (APC) id of a just-paired phone, found by name. Can take ~5-25 s after pairing."""
+        if not self.available or not name:
+            return None
+        try:
+            return self._run(self._resolve_apc_id_by_name(name), timeout=35.0)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bt_audio] resolve_apc_id failed: {type(exc).__name__}: {exc}")
+            return None
 
     def pair_device(self, device_id: str) -> dict[str, Any]:
         """CustomPairing (CONFIRM_ONLY) for an unpaired AEP device (~30s timeout)."""
@@ -545,6 +562,9 @@ class BluetoothAudioService:
             elapsed = 0.0
             step = 1.0
             while elapsed < timeout:
+                if self._discovery_cancel.is_set():
+                    print(f"[bt_audio] {label}: cancelled")
+                    break
                 await asyncio.sleep(step)
                 elapsed += step
                 if int(elapsed) % 4 == 0:
@@ -590,13 +610,8 @@ class BluetoothAudioService:
                 passes.append(("bt_unpaired", str(sel), 15.0, kind))
             except Exception as exc:  # noqa: BLE001
                 print(f"[bt_audio] BluetoothDevice selector failed: {exc}")
-        if _BT_DEVICE_OK and BluetoothLEDevice is not None:
-            try:
-                sel = BluetoothLEDevice.get_device_selector_from_pairing_state(False)
-                print(f"[bt_audio] BluetoothLEDevice unpaired selector: {sel[:160]}…")
-                passes.append(("ble_unpaired", str(sel), 8.0, kind))
-            except Exception as exc:  # noqa: BLE001
-                print(f"[bt_audio] BluetoothLEDevice selector failed: {exc}")
+        # (No Bluetooth LE pass: phones stream music over classic Bluetooth, and an LE scan
+        # only adds 8 s of radio time that disturbs a live audio link.)
 
         # 2) Explicit classic unpaired+inquiry AQS (StackOverflow / MS pattern).
         passes.append(("classic_inquiry", _NEARBY_UNPAIRED_CLASSIC, 12.0, kind))
@@ -659,6 +674,9 @@ class BluetoothAudioService:
         # Prefer the first strong unpaired inquiry pass alone (~15s) before falling
         # through — stacking everything takes too long when the first works.
         for label, selector, timeout, aep_kind in passes:
+            if self._discovery_cancel.is_set():
+                print("[bt_audio] nearby discovery cancelled")
+                break
             if devices and label in ("all_bt_aep", "aep_container"):
                 # Already have hits — skip broad fallbacks.
                 continue
@@ -821,15 +839,15 @@ class BluetoothAudioService:
                 "alert": is_failed or status_name in ("FAILED", "19"),
             }
 
-        # APC audio endpoints can take a moment to appear after pairing.
-        await asyncio.sleep(2.0)
-        apc_id = await self._resolve_apc_id_by_name(name)
+        # Return straight away: looking up the phone's audio (APC) id takes another 5-25 s and
+        # used to run inside the 45 s pairing timeout, so a successful pairing was reported as
+        # failed and the user had to tap Pair twice. The app now calls resolve_apc_id() itself.
         return {
             "ok": True,
             "already_paired": status_name == "ALREADY_PAIRED",
-            "device_id": apc_id or device_id,
+            "device_id": device_id,
             "paired_aep_id": device_id,
-            "apc_id": apc_id,
+            "apc_id": None,
             "name": name,
             "status": status_name,
         }
@@ -843,14 +861,29 @@ class BluetoothAudioService:
             except Exception as exc:  # noqa: BLE001
                 print(f"[bt_audio] APC resolve after pair failed: {exc}")
                 infos = []
+            exact: list[tuple[str, str]] = []
+            loose: list[tuple[str, str]] = []
             for info in infos:
                 info_name = str(info.name).strip() if info.name else ""
-                if self._names_match(info_name, name):
-                    print(f"[bt_audio] resolved APC id for {name!r} → {info_name!r}")
-                    return str(info.id)
+                if self._norm_name(info_name) == self._norm_name(name) and info_name:
+                    exact.append((str(info.id), info_name))
+                elif self._names_match(info_name, name):
+                    loose.append((str(info.id), info_name))
+            # Exact name first. A partial match ("iPhone" vs "Ali's iPhone") only when it is the
+            # only candidate, so a second paired phone with a similar name is never picked.
+            pick = exact[0] if exact else (loose[0] if len(loose) == 1 else None)
+            if pick is not None:
+                print(f"[bt_audio] resolved APC id for {name!r} → {pick[1]!r}")
+                return pick[0]
+            if len(loose) > 1:
+                print(f"[bt_audio] {len(loose)} phones look like {name!r} — not guessing")
             await asyncio.sleep(1.0 + attempt * 0.4)
         print(f"[bt_audio] no APC device yet for {name!r} — user should Scan")
         return None
+
+    @staticmethod
+    def _norm_name(a: str) -> str:
+        return "".join(ch for ch in (a or "").lower() if ch.isalnum())
 
     @staticmethod
     def _names_match(a: str, b: str) -> bool:
@@ -1025,15 +1058,19 @@ class BluetoothAudioService:
         status = result.status
         ok = status == AudioPlaybackConnectionOpenResultStatus.SUCCESS
         waiting = status == AudioPlaybackConnectionOpenResultStatus.REQUEST_TIMED_OUT
-        if ok:
-            self._opened_ids.add(device_id)
         try:
             if AudioPlaybackConnectionState is not None and conn.state == AudioPlaybackConnectionState.OPENED:
-                self._opened_ids.add(device_id)
+                ok = True
         except Exception:  # noqa: BLE001
             pass
+        if ok:
+            self._opened_ids.add(device_id)
+            self._dropped_ids.discard(device_id)
+            waiting = False
+        # REQUEST_TIMED_OUT = the phone hasn't accepted the audio link yet. That is NOT connected:
+        # the app shows "Waiting for phone…" and tries again instead of claiming audio is ready.
         return {
-            "ok": ok or waiting,
+            "ok": ok,
             "waiting": waiting,
             "status": _status_name(status),
             "device_id": device_id,
@@ -1099,6 +1136,13 @@ class BluetoothAudioService:
             return False
 
     async def _get_status(self, device_id: str) -> dict[str, Any]:
+        """connected=True only while the audio link is really OPENED.
+
+        A link that drops (phone walked away, radio glitch) keeps its AudioPlaybackConnection
+        (started, not closed), so the phone can reconnect and the app can re-open it without a
+        new pairing / Connect. It is only closed when the phone can't come back by itself:
+        Bluetooth off, device gone/unpaired, or a broken connection object.
+        """
         radio_on = await self._bluetooth_radio_on()
         if radio_on is False:
             await self._disconnect(device_id, forget=False)
@@ -1106,15 +1150,6 @@ class BluetoothAudioService:
                 "connected": False,
                 "reason": "bluetooth_off",
                 "message": "Bluetooth is off",
-            }
-
-        if device_id in self._dropped_ids:
-            self._dropped_ids.discard(device_id)
-            await self._disconnect(device_id, forget=False)
-            return {
-                "connected": False,
-                "reason": "closed",
-                "message": "Phone disconnected",
             }
 
         conn = self._connections.get(device_id)
@@ -1133,6 +1168,7 @@ class BluetoothAudioService:
 
         if AudioPlaybackConnectionState is not None and state == AudioPlaybackConnectionState.OPENED:
             self._opened_ids.add(device_id)
+            self._dropped_ids.discard(device_id)
             return {"connected": True, "state": "opened"}
 
         present = await self._device_still_present(device_id)
@@ -1144,16 +1180,23 @@ class BluetoothAudioService:
                 "message": "Device unavailable (phone Bluetooth off or unpaired)",
             }
 
-        if device_id in self._opened_ids:
+        if device_id in self._dropped_ids or device_id in self._opened_ids:
+            # Was playing, now closed: remember it (keep the connection object) until it re-opens.
             self._opened_ids.discard(device_id)
-            await self._disconnect(device_id, forget=False)
+            self._dropped_ids.add(device_id)
             return {
                 "connected": False,
                 "reason": "closed",
                 "message": "Phone disconnected",
             }
 
-        return {"connected": True, "state": "waiting"}
+        # Started but never opened: the phone hasn't accepted the audio link (yet).
+        return {
+            "connected": False,
+            "reason": "waiting",
+            "waiting": True,
+            "message": "Waiting for the phone to accept audio",
+        }
 
     # ----------------------------------------------------------- disconnect ---
     def disconnect(self, device_id: str | None = None, *, forget: bool = False) -> dict[str, Any]:

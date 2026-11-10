@@ -16,3 +16,11 @@
 - add haptics calibration in Settings: level, on/off and body position per transducer, overall haptic level, step-by-step test that pulses one transducer at a time
 - add Wi-Fi on/off switch on the Wi-Fi screen (to test whether Wi-Fi disturbs the Bluetooth audio)
 - Wi-Fi turns off by itself while a phone is connected over Bluetooth (fixes choppy Bluetooth music) and comes back on after the phone disconnects
+- Bluetooth: one tap to add a phone: Pair, confirm on the phone, and it connects by itself (no more second Pair tap or separate Connect)
+- Bluetooth: a phone that drops out reconnects by itself for 2 minutes and the music comes straight back; "Waiting for phone…" is shown instead of "Connected" until the phone really sends audio; one phone at a time; Scan is locked while a phone is connected (scanning made the music choppy)
+- Bluetooth: clear message when the audio can't be routed to VB-Cable instead of silent failure
+- smoother sound: small audio cushion on both Gigaports, CABLE recorded through WASAPI instead of the old MME driver, Gigaports stay open between reconnects
+- the app notices a crashed audio engine or an unplugged Gigaport, shows it, and restarts Live by itself
+- volume, vibration, bass, vibration mode, speaker route, zones and Gigaport roles are remembered after a restart
+- logs for support in C:\kiosk_launcher\updates\app.log and engine.log
+- fix: Bluetooth Live didn't start while the haptics calibration had the Gigaports open

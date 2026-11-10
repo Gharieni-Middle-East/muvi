@@ -12,3 +12,7 @@ haptics_calibration.json
 
 # set while the app keeps Wi-Fi off for a Bluetooth phone
 wifi_off_for_bluetooth.flag
+
+# saved user settings (volume, vibration, modes)
+muvi_settings.json
+muvi_settings.json.tmp

@@ -23,6 +23,8 @@ from audio.live_input import (
     LiveAudioEngine,
     find_gigaport_loopback_device,
     pick_aux_capture_device,
+    cable_capture_fallbacks,
+    describe_hostapi,
     pick_cable_capture_device,
     pick_default_capture_device,
 )
@@ -328,7 +330,7 @@ def start_live_audio(
         f"[live_audio] mode={mode} layout={layout} speaker={speaker_route} "
         f"prefer_bt={prefer_bluetooth} "
         f"capture={capture.get('name')!r} "
-        f"backend={capture.get('backend')} "
+        f"backend={capture.get('backend')} api={describe_hostapi(capture)} "
         f"output={output_name!r}",
         flush=True,
     )
@@ -351,21 +353,42 @@ def start_live_audio(
     _live_engine.set_highpass_hz(highpass_hz)
     _live_engine.set_lowpass_hz(cutoff_hz)
 
-    try:
+    def _start_with(cap: dict[str, Any]) -> None:
         _live_engine.start(
-            capture_device=capture,
+            capture_device=cap,
             output_device_index=output_index,
             audio_output_device_index=audio_output_index,
-            loopback=bool(capture.get("loopback")),
-            capture_channels=int(capture.get("channels", 2)),
+            loopback=bool(cap.get("loopback")),
+            capture_channels=int(cap.get("channels", 2)),
             segmentation_id=segmentation_id,
             frequency_profile_id=frequency_profile_id,
             synthetic_vibro=synthetic_vibro,
             synthetic_type_id=synthetic_type_id,
             vibration_overlay=vibration_overlay,
         )
+
+    try:
+        _start_with(capture)
     except (PortAudioError, RuntimeError, OSError) as exc:
-        raise RuntimeError(str(exc)) from exc
+        # CABLE is now opened through WASAPI first. If that one won't open on this tablet,
+        # fall back to the same CABLE device on DirectSound / MME (the old behaviour).
+        if mode != "cable" or "gigaport output" in str(exc).lower():
+            raise RuntimeError(str(exc)) from exc
+        last: Exception = exc
+        for alt in cable_capture_fallbacks(capture):
+            print(
+                f"[live_audio] CABLE via {describe_hostapi(capture)} failed ({last}); "
+                f"trying {describe_hostapi(alt)} #{alt.get('index')}",
+                flush=True,
+            )
+            try:
+                _start_with(alt)
+                capture = alt
+                break
+            except (PortAudioError, RuntimeError, OSError) as alt_exc:
+                last = alt_exc
+        else:
+            raise RuntimeError(str(last)) from last
 
     return {
         "ok": True,
@@ -469,3 +492,12 @@ def get_audio_settings(
 
 def is_active() -> bool:
     return _live_engine.is_active
+
+
+def streams_ok() -> tuple[bool, str]:
+    """(False, why) when a running device stopped (e.g. a Gigaport was unplugged)."""
+    return _live_engine.streams_ok()
+
+
+def underrun_counts() -> dict[str, int]:
+    return _live_engine.underrun_counts()

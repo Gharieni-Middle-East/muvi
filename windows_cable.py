@@ -43,17 +43,28 @@ def find_cable_playback_device() -> dict[str, str] | None:
             if not name or not dev_id:
                 continue
             if _is_cable_playback_name(name):
-                candidates.append({"id": dev_id, "name": name})
+                candidates.append({"id": dev_id, "name": name, "active": _is_active(dev)})
     except Exception as exc:  # noqa: BLE001
         print(f"[windows_cable] GetAllDevices failed: {exc}")
         return None
 
     if not candidates:
         return None
-    for c in candidates:
-        if "cable input" in c["name"].lower():
-            return c
-    return candidates[0]
+    # GetAllDevices also lists disabled / unplugged / stale endpoints (e.g. left over from an
+    # older VB-Cable install). Setting one of those as default sends the phone audio nowhere.
+    candidates.sort(key=lambda c: (not c["active"], "cable input" not in c["name"].lower()))
+    best = candidates[0]
+    return {"id": best["id"], "name": best["name"]}
+
+
+def _is_active(dev: Any) -> bool:
+    state = getattr(dev, "state", None)
+    if state is None:
+        return True  # unknown: don't rule it out
+    try:
+        return int(getattr(state, "value", state)) == 1  # DEVICE_STATE_ACTIVE
+    except (TypeError, ValueError):
+        return "active" in str(state).lower()
 
 
 def _set_default_endpoint(device_id: str) -> None:

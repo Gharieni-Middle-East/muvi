@@ -47,6 +47,15 @@ GIGAPORT_VIBRATION_CHANNELS = (2, 3, 4, 5)
 BLOCKSIZE = 2048
 # Deep enough to smooth capture/output jitter without dropping vibration blocks.
 RING_MAX_BLOCKS = 32
+# Live capture jitter buffer (BLOCKSIZE=2048 frames ≈ 43 ms at 48 kHz). Each output waits for
+# LIVE_PRIME_BLOCKS before it starts (and again after running dry) instead of playing every
+# block the moment it arrives, so a late capture block no longer becomes a gap. The capture
+# clock (CABLE) and the two Gigaport clocks drift apart slowly; LIVE_RING_CAP drops one old
+# block when a ring grows past it, so latency and the audio/vibration offset stay bounded.
+LIVE_PRIME_BLOCKS = 2
+LIVE_RING_CAP = 8
+# An output/input callback that hasn't run for this long means the device is gone (unplugged).
+STREAM_STALL_S = 3.0
 PROCESSING_SR = TARGET_SR
 
 MUVI_HIGHPASS_HZ = 30.0
@@ -227,6 +236,56 @@ def pick_default_capture_device() -> dict[str, Any] | None:
     return devices[0] if devices else None
 
 
+def _hostapi_rank(dev: dict[str, Any]) -> int:
+    """Sort key: lower = preferred Windows audio API for capture."""
+    if dev.get("backend") == "soundcard":
+        return 1  # soundcard loopback = WASAPI underneath
+    try:
+        api = str(sd.query_hostapis(int(dev["hostapi"]))["name"]).lower()
+    except Exception:  # noqa: BLE001
+        return 5
+    if "wasapi" in api:
+        return 0
+    if "directsound" in api:
+        return 2
+    if "mme" in api:
+        return 3
+    if "wdm" in api or "kernel" in api:
+        return 9
+    return 5
+
+
+def cable_capture_fallbacks(first: dict[str, Any]) -> list[dict[str, Any]]:
+    """The same CABLE capture endpoint on the other Windows audio APIs (best first, no WDM-KS),
+    tried when the preferred one won't open."""
+    def _key(d: dict[str, Any]) -> str:
+        n = str(d.get("name", "")).lower()
+        return "cable output" if "cable output" in n else ("cable input" if "cable input" in n else n[:12])
+
+    want = _key(first)
+    out = [
+        d for d in list_capture_devices()
+        if d.get("backend") == "sounddevice"
+        and d.get("index") != first.get("index")
+        and "gigaport" not in str(d.get("name", "")).lower()
+        and _key(d) == want
+        and _hostapi_rank(d) < 9
+    ]
+    out.sort(key=_hostapi_rank)
+    return out
+
+
+def describe_hostapi(dev: dict[str, Any] | None) -> str:
+    if not dev:
+        return "?"
+    if dev.get("backend") == "soundcard":
+        return "WASAPI loopback"
+    try:
+        return str(sd.query_hostapis(int(dev["hostapi"]))["name"])
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def pick_cable_capture_device() -> dict[str, Any] | None:
     """VB-Cable path used with the old app: phone → CABLE Input → capture CABLE.
 
@@ -243,6 +302,10 @@ def pick_cable_capture_device() -> dict[str, Any] | None:
     cableish = [d for d in devices if not _is_gigaport(d) and (
         "cable" in _name(d) or "vb-audio" in _name(d)
     )]
+    # The same CABLE endpoint is listed once per Windows audio API. PortAudio lists MME first,
+    # which adds its own large, jittery buffering (and truncates names); WDM-KS often fails or
+    # takes the device exclusively. Try WASAPI first, then DirectSound, MME, WDM-KS last.
+    cableish.sort(key=_hostapi_rank)
 
     # 1) CABLE Output (recording end) — what you hear after phone hits CABLE Input.
     for key in ("cable output", "vb-audio point"):
@@ -793,6 +856,13 @@ class LiveAudioEngine:
         self._cb_silent_frames = 0
         self._audio_cb_frames = 0
         self._audio_cb_silent_frames = 0
+        self._vib_primed = False
+        self._audio_primed = False
+        self._ring_cap: int | None = None  # LIVE_RING_CAP for live capture, None for file feed
+        self._underruns = {"vib": 0, "audio": 0}
+        self._underrun_log_at = 0.0
+        self._streams_started_at: float | None = None
+        self._cb_at = {"vib": 0.0, "audio": 0.0, "input": 0.0}
         self.stats: dict[str, float] = {
             "rms_legs": 0.0,
             "rms_mid": 0.0,
@@ -1155,9 +1225,15 @@ class LiveAudioEngine:
 
     def _push_vibration_block(self, vib: np.ndarray) -> None:
         with self.lock:
-            # No manual dropping: the delay line controls latency and the deque
-            # maxlen is the only (rarely hit) overflow guard. Keeps vibration smooth.
-            self._output_ring.append(vib)
+            self._append_capped_locked(self._output_ring, vib)
+
+    def _append_capped_locked(self, ring: collections.deque, block: np.ndarray) -> None:
+        """Append; in live capture also drop the oldest block once the ring passes LIVE_RING_CAP
+        (clock drift between CABLE and the Gigaports). Caller holds self.lock."""
+        ring.append(block)
+        cap = self._ring_cap
+        if cap is not None and len(ring) > cap:
+            ring.popleft()
 
     def _ingest_capture(self, capture: np.ndarray) -> None:
         """Route captured audio to the correct pipeline (audio thread, no queue hop)."""
@@ -1344,7 +1420,7 @@ class LiveAudioEngine:
                     elif audio_ch >= 2:
                         audio_out[:, 0:2] = np.clip(audio[:n], -1.0, 1.0)
                     with self.lock:
-                        self._audio_output_ring.append(audio_out)
+                        self._append_capped_locked(self._audio_output_ring, audio_out)
             elif vib8 is not None and self.output_layout == "dual_asio4all":
                 # ch1-8 = the 8 haptic channels as-is (keeps left/right), audio on ch9-12.
                 n = min(len(audio), len(vib8))
@@ -1608,6 +1684,7 @@ class LiveAudioEngine:
             stop_event=self._loopback_stop,
         )
         self._loopback_thread.start()
+        self._mark_streams_started(live=True)
         self.is_active = True
 
     def _start_sounddevice(
@@ -1708,6 +1785,7 @@ class LiveAudioEngine:
                 if self.audio_output_stream is not None:
                     self.audio_output_stream.start()
                 self.input_stream.start()
+                self._mark_streams_started(live=True)
                 self.is_active = True
                 return
             except Exception as exc:
@@ -1843,6 +1921,7 @@ class LiveAudioEngine:
                     flush=True,
                 )
         self.output_stream.start()
+        self._mark_streams_started(live=False)
         self.is_active = True
         self._file_thread = threading.Thread(
             target=self._file_feed_loop,
@@ -1999,6 +2078,10 @@ class LiveAudioEngine:
             self._current_offset = 0
             self._audio_current_block = None
             self._audio_current_offset = 0
+            self._vib_primed = False
+            self._audio_primed = False
+            self._ring_cap = None
+            self._streams_started_at = None
             self.stats = {
                 "rms_legs": 0.0,
                 "rms_mid": 0.0,
@@ -2015,6 +2098,63 @@ class LiveAudioEngine:
                 "vibe_lag_ms": self._delays_ms(self.vibe_sync_ms)[1],
                 "audio_lag_ms": self._delays_ms(self.vibe_sync_ms)[0],
             }
+
+    def _mark_streams_started(self, *, live: bool) -> None:
+        with self.lock:
+            self._ring_cap = LIVE_RING_CAP if live else None
+            self._vib_primed = False
+            self._audio_primed = False
+            self._underruns = {"vib": 0, "audio": 0}
+            self._streams_started_at = time.monotonic()
+            self._cb_at = {"vib": 0.0, "audio": 0.0, "input": 0.0}
+
+    def _note_underrun_locked(self, which: str) -> None:
+        self._underruns[which] = self._underruns.get(which, 0) + 1
+        now = time.monotonic()
+        if now - self._underrun_log_at >= 5.0:
+            self._underrun_log_at = now
+            print(
+                f"[live_input] output ran dry ({which}); underruns vib={self._underruns.get('vib', 0)} "
+                f"audio={self._underruns.get('audio', 0)} — refilling cushion",
+                flush=True,
+            )
+
+    def streams_ok(self) -> tuple[bool, str]:
+        """False when a running device has stopped: stream no longer active, a callback that
+        hasn't run for STREAM_STALL_S (USB Gigaport unplugged), or a dead capture/file thread."""
+        if not self.is_active:
+            return True, ""
+        now = time.monotonic()
+        with self.lock:
+            started = self._streams_started_at
+            cb_at = dict(self._cb_at)
+        if started is None:
+            return True, ""
+        checks = (
+            ("output_stream", "vib", "vibration Gigaport"),
+            ("audio_output_stream", "audio", "headphone Gigaport"),
+            ("input_stream", "input", "audio input"),
+        )
+        for attr, key, label in checks:
+            stream = getattr(self, attr, None)
+            if stream is None:
+                continue
+            try:
+                if not bool(stream.active):
+                    return False, f"{label} stream stopped"
+            except Exception as exc:  # noqa: BLE001
+                return False, f"{label} stream error: {exc}"
+            last = max(cb_at.get(key) or started, started)
+            if now - last > STREAM_STALL_S:
+                return False, f"{label} stopped responding"
+        if self._loopback_thread is not None and not self._loopback_thread.is_alive():
+            if not self._loopback_stop.is_set():
+                return False, "audio capture stopped"
+        return True, ""
+
+    def underrun_counts(self) -> dict[str, int]:
+        with self.lock:
+            return dict(self._underruns)
 
     def _prepare_capture(self, capture: np.ndarray) -> np.ndarray:
         """Pass L/R loopback through unchanged — vibration is derived from this signal."""
@@ -2036,6 +2176,7 @@ class LiveAudioEngine:
         return self._audio_output_ring.popleft()
 
     def _input_callback(self, indata, frames, _time_info, _status) -> None:
+        self._cb_at["input"] = time.monotonic()
         try:
             self._ingest_capture(np.asarray(indata, dtype=np.float32))
         except Exception:
@@ -2047,13 +2188,22 @@ class LiveAudioEngine:
         ch_count = self.output_channel_count
         output = np.zeros((frames, ch_count), dtype=np.float32)
 
+        self._cb_at["vib"] = time.monotonic()
         while needed > 0:
             with self.lock:
                 if self._current_block is None:
+                    if not self._vib_primed:
+                        if len(self._output_ring) < LIVE_PRIME_BLOCKS:
+                            break  # still building the cushion — play silence
+                        self._vib_primed = True
                     self._current_block = self._take_next_output_block_locked()
                     self._current_offset = 0
 
                 if self._current_block is None:
+                    # Ran dry: rebuild the cushion before playing again (one clean gap
+                    # instead of a stutter on every late block).
+                    self._vib_primed = False
+                    self._note_underrun_locked("vib")
                     break
 
                 block = self._current_block
@@ -2104,13 +2254,20 @@ class LiveAudioEngine:
         ch_count = self.audio_output_channel_count
         output = np.zeros((frames, ch_count), dtype=np.float32)
 
+        self._cb_at["audio"] = time.monotonic()
         while needed > 0:
             with self.lock:
                 if self._audio_current_block is None:
+                    if not self._audio_primed:
+                        if len(self._audio_output_ring) < LIVE_PRIME_BLOCKS:
+                            break
+                        self._audio_primed = True
                     self._audio_current_block = self._take_next_audio_output_block_locked()
                     self._audio_current_offset = 0
 
                 if self._audio_current_block is None:
+                    self._audio_primed = False
+                    self._note_underrun_locked("audio")
                     break
 
                 block = self._audio_current_block

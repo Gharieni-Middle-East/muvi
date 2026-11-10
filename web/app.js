@@ -21,7 +21,8 @@ const MockApi = (() => {
     track: { title: "Weightless", artist: "Marconi Union", album: "Ambient Transmissions", duration: 486, artwork: "assets/artwork.svg" },
     bluetooth: {
       connected_id: null, connecting_id: null, scanning: false,
-      discovering: false, pairing_id: null, forgetting: false, error: null, supported: false,
+      discovering: false, pairing_id: null, pair_stage: null, waiting_id: null, waiting_kind: null,
+      forgetting: false, error: null, supported: false,
     },
     media: { ok: true, can_seek: true, can_prev: true, can_next: true },
     demo: { available: true, error: null },
@@ -188,12 +189,15 @@ const MockApi = (() => {
     discover_nearby: async () => MockApi.scan_bluetooth(),
     pair_device: async (id) => {
       state.bluetooth.pairing_id = id;
+      state.bluetooth.pair_stage = "confirm";
+      setTimeout(() => { state.bluetooth.pair_stage = "audio"; }, 1200);
       setTimeout(() => {
         state.bluetooth.pairing_id = null;
+        state.bluetooth.pair_stage = null;
         state.nearby_devices = [];
-        state.devices = [{ id: "demo-paired", name: "Demo Phone", profile: "Audio ready — tap Connect", paired: true, audio_ready: true, kind: "phone" }];
-        state.bluetooth.error = "Paired — tap Connect on the phone below.";
-      }, 1200);
+        state.devices = [{ id: "demo-paired", name: "Demo Phone", profile: "Paired - tap Connect", paired: true, audio_ready: true, kind: "phone" }];
+        MockApi.connect_device("demo-paired");
+      }, 2400);
       return snap();
     },
     open_bluetooth_settings: async () => {
@@ -854,7 +858,7 @@ function render(s) {
 
   const connected = (s.devices || []).find((d) => d.id === s.bluetooth.connected_id);
   const online = Boolean(connected);
-  const btSession = Boolean(s.bluetooth.connected_id);
+  const btSession = Boolean(s.bluetooth.connected_id) || Boolean(s.bluetooth.waiting_id);
   const connectingId = s.bluetooth.connecting_id || null;
   const connectingDev = connectingId
     ? (s.devices || []).find((d) => d.id === connectingId)
@@ -1058,6 +1062,13 @@ function render(s) {
     statusSub = "Connected";
     statusIcon = statusIconBluetooth;
     navigateTarget = "bluetooth";
+  } else if (s.bluetooth && s.bluetooth.waiting_id) {
+    const wDev = (s.devices || []).find((d) => d.id === s.bluetooth.waiting_id);
+    statusClass = "idle";
+    statusTitle = wDev ? wDev.name : "Phone";
+    statusSub = s.bluetooth.waiting_kind === "reconnect" ? "Reconnecting…" : "Waiting for phone…";
+    statusIcon = statusIconBluetooth;
+    navigateTarget = "bluetooth";
   } else if (liveInput.ready && liveInput.mode === "aux") {
     statusClass = "ready";
     statusTitle = "AUX ready";
@@ -1094,9 +1105,19 @@ function render(s) {
   el("statusCard").classList.toggle("online", online || isAuxLive);
   const bt = s.bluetooth;
   const pairingId = bt.pairing_id || null;
-  el("statusCard").classList.toggle("connecting", Boolean(connectingId) || Boolean(pairingId));
+  const waitingId = bt.waiting_id || null;
+  const waitingDev = waitingId ? (s.devices || []).find((d) => d.id === waitingId) : null;
+  const pairAudio = Boolean(pairingId) && bt.pair_stage === "audio";
+  el("statusCard").classList.toggle(
+    "connecting", Boolean(connectingId) || Boolean(pairingId) || Boolean(waitingId)
+  );
   if (pairingId) {
-    el("statusTitle").textContent = "Waiting for confirmation…";
+    el("statusTitle").textContent = pairAudio ? "Paired" : "Waiting for confirmation…";
+  } else if (waitingId && !connectingId) {
+    const nm = waitingDev ? waitingDev.name : "phone";
+    el("statusTitle").textContent = bt.waiting_kind === "reconnect"
+      ? `Reconnecting to ${nm}…`
+      : `Waiting for ${nm}…`;
   } else if (isAuxLive) {
     el("statusTitle").textContent = "AUX Live";
   } else if (connectingId) {
@@ -1112,7 +1133,11 @@ function render(s) {
       ? `Capturing ${capture || "AUX"} → Gigaport`
       : "AUX Live — play music on the phone";
   } else if (pairingId) {
-    sub = "Waiting for confirmation on the phone…";
+    sub = pairAudio
+      ? "Getting the audio connection ready — it connects by itself…"
+      : "Confirm the pairing on the phone…";
+  } else if (waitingId && !connectingId) {
+    sub = bt.error || "Waiting for the phone…";
   } else if (connectingId) {
     sub = "Please wait — opening Bluetooth audio connection…";
   }   else if (online && s.engine_error) sub = `BT connected, but Live failed: ${s.engine_error}`;
@@ -1125,7 +1150,8 @@ function render(s) {
   else if (bt.scanning || bt.discovering) sub = "Scanning nearby — put the phone in pairing mode…";
   el("statusSub").textContent = sub;
   const forgetting = Boolean(bt.forgetting);
-  el("disconnectBtn").hidden = !online || Boolean(connectingId) || Boolean(pairingId);
+  // Also shown while reconnecting, to cancel it.
+  el("disconnectBtn").hidden = !(online || waitingId) || Boolean(connectingId) || Boolean(pairingId);
   el("disconnectBtn").disabled = forgetting;
   // Single-device Forget hidden for now — use Forget all.
   const forgetBtn = el("forgetBtn");
@@ -1136,8 +1162,11 @@ function render(s) {
 
   const scanBtn = el("scanBtn");
   const busyBt = Boolean(bt.scanning) || Boolean(bt.discovering) || Boolean(connectingId) || Boolean(pairingId) || forgetting;
+  // No nearby scan while a phone is playing: it keeps the radio busy and makes the music choppy.
+  const phoneInUse = Boolean(bt.connected_id) || Boolean(waitingId);
   scanBtn.classList.toggle("scanning", Boolean(bt.scanning) || Boolean(bt.discovering));
-  scanBtn.disabled = busyBt;
+  scanBtn.disabled = busyBt || phoneInUse;
+  scanBtn.title = phoneInUse ? "Disconnect the phone first to look for other phones" : "";
   el("scanLabel").textContent = (bt.scanning || bt.discovering) ? "Scanning…" : "Scan";
   const forgetAllBtn = el("forgetAllBtn");
   if (forgetAllBtn) {
@@ -1159,6 +1188,8 @@ function devicesSig(s) {
     s.bluetooth.scanning ? "1" : "0",
     s.bluetooth.pairing_id || "",
     s.bluetooth.forgetting ? "1" : "0",
+    s.bluetooth.waiting_id || "",
+    s.bluetooth.waiting_kind || "",
   ].join("::");
 }
 
@@ -1197,13 +1228,17 @@ function renderDevices(s) {
   devices.forEach((d) => {
     const isConn = d.id === s.bluetooth.connected_id;
     const isConnecting = d.id === connectingId;
+    const isWaiting = !isConnecting && d.id === s.bluetooth.waiting_id;
     const li = document.createElement("li");
     li.className = "device"
       + (isConn ? " connected" : "")
-      + (isConnecting ? " connecting" : "");
+      + (isConnecting || isWaiting ? " connecting" : "");
     let action = "";
     if (isConn) {
       action = '<span class="badge">Connected</span>';
+    } else if (isWaiting) {
+      const label = s.bluetooth.waiting_kind === "reconnect" ? "Reconnecting…" : "Waiting…";
+      action = `<button class="btn-connect busy" disabled><span class="btn-spin"></span>${label}</button>`;
     } else if (isConnecting) {
       action = '<button class="btn-connect busy" disabled><span class="btn-spin"></span>Connecting…</button>';
     } else {

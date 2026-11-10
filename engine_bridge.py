@@ -21,6 +21,8 @@ class EngineBridge:
         self.vibration_output_index: int | None = None
         self.audio_output_index: int | None = None
         self._running = False
+        self._mode: str | None = None  # 'live' | 'demo' while running
+        self._last_start: dict[str, Any] = {}
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
         self._worker_path = os.path.join(
@@ -105,7 +107,16 @@ class EngineBridge:
         except Exception:  # noqa: BLE001
             pass
 
-    def _send(self, msg: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+    def _worker_alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _send(
+        self, msg: dict[str, Any], *, timeout: float | None = None, spawn: bool = True
+    ) -> dict[str, Any]:
+        if not spawn and not self._worker_alive():
+            # Never respawn an empty worker for a volume/stats call: that hid engine crashes
+            # (the app kept showing "playing" with a fresh worker that played nothing).
+            raise RuntimeError("engine worker is not running")
         self._ensure_worker()
         assert self._proc is not None and self._proc.stdin is not None
         self._proc.stdin.write(json.dumps(msg) + "\n")
@@ -139,13 +150,17 @@ class EngineBridge:
         vibration_muted: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
-            if self._running:
-                return {
-                    "ok": True,
-                    "capture": self.capture_name,
-                    "output_index": self.output_index,
-                    "output_name": self.output_name,
-                }
+            # Already running Bluetooth Live on CABLE: keep it (a phone reconnecting or a
+            # second Connect must not cold-restart both Gigaports). Anything else - Demo,
+            # calibration, AUX, a dead worker - gets a fresh worker below.
+            if (
+                self._running
+                and self._mode == "live"
+                and prefer_bluetooth
+                and self._last_start.get("mode") == "cable"
+                and self._worker_alive()
+            ):
+                return dict(self._last_start)
             try:
                 # Fresh worker each Start Live for a clean audio backend state.
                 self._kill_worker()
@@ -194,7 +209,8 @@ class EngineBridge:
                 f"[engine_bridge] START LIVE ok — mode={mode} "
                 f"capture={self.capture_name!r} output={self.output_name}"
             )
-            return {
+            self._mode = "live"
+            self._last_start = {
                 "ok": True,
                 "capture": self.capture_name,
                 "output_index": self.output_index,
@@ -205,6 +221,7 @@ class EngineBridge:
                 "speaker_route": result.get("speaker_route"),
                 "vibration_mode": result.get("vibration_mode"),
             }
+            return dict(self._last_start)
 
     def start_demo(
         self,
@@ -267,6 +284,8 @@ class EngineBridge:
             self.vibration_output_index = vibration_output_index
             self.audio_output_index = audio_output_index
             self._running = True
+            self._mode = "demo"
+            self._last_start = {}
             self.last_error = None
             print(
                 f"[engine_bridge] START DEMO ok — file={self.capture_name!r} "
@@ -293,7 +312,7 @@ class EngineBridge:
             if not self._running:
                 return {"position": 0.0, "duration": 0.0, "fraction": 0.0}
             try:
-                result = self._send({"cmd": "demo_progress"})
+                result = self._send({"cmd": "demo_progress"}, spawn=False)
                 return {
                     "position": float(result.get("position") or 0.0),
                     "duration": float(result.get("duration") or 0.0),
@@ -307,7 +326,7 @@ class EngineBridge:
             if not self._running:
                 return {"position": 0.0, "duration": 0.0, "fraction": 0.0}
             try:
-                result = self._send({"cmd": "seek_demo", "seconds": float(seconds)})
+                result = self._send({"cmd": "seek_demo", "seconds": float(seconds)}, spawn=False)
                 return {
                     "position": float(result.get("position") or 0.0),
                     "duration": float(result.get("duration") or 0.0),
@@ -323,11 +342,13 @@ class EngineBridge:
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 try:
-                    self._send({"cmd": "stop"})
+                    self._send({"cmd": "stop"}, timeout=5.0, spawn=False)
                 except Exception:  # noqa: BLE001
                     pass
             self._kill_worker()
             self._running = False
+            self._mode = None
+            self._last_start = {}
             print("[engine_bridge] STOP LIVE")
 
     def stop(self) -> None:
@@ -356,7 +377,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "set_volume", "value": float(value)})
+                self._send({"cmd": "set_volume", "value": float(value)}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -365,7 +386,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "set_audio_muted", "muted": bool(muted)})
+                self._send({"cmd": "set_audio_muted", "muted": bool(muted)}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -374,7 +395,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "set_vibration", "value": float(value)})
+                self._send({"cmd": "set_vibration", "value": float(value)}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -383,7 +404,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "set_vibration_muted", "muted": bool(muted)})
+                self._send({"cmd": "set_vibration_muted", "muted": bool(muted)}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -396,7 +417,7 @@ class EngineBridge:
                     "cmd": "set_zone_enabled",
                     "zone": str(zone),
                     "enabled": bool(enabled),
-                })
+                }, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -409,7 +430,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "set_cutoff_hz", "value": float(value)})
+                self._send({"cmd": "set_cutoff_hz", "value": float(value)}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -418,7 +439,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "set_haptic_calibration", "calibration": calibration})
+                self._send({"cmd": "set_haptic_calibration", "calibration": calibration}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -428,7 +449,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "haptic_test", "channel": channel})
+                self._send({"cmd": "haptic_test", "channel": channel}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -437,7 +458,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "set_speaker_route", "route": str(route)})
+                self._send({"cmd": "set_speaker_route", "route": str(route)}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -446,7 +467,7 @@ class EngineBridge:
             if not self._running:
                 return
             try:
-                self._send({"cmd": "set_vibration_mode", "mode": str(mode)})
+                self._send({"cmd": "set_vibration_mode", "mode": str(mode)}, spawn=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -482,6 +503,7 @@ class EngineBridge:
                             "roles_flipped": bool(roles_flipped),
                         },
                         timeout=8.0,
+                        spawn=False,
                     )
                     if result.get("ok"):
                         return result
@@ -503,13 +525,51 @@ class EngineBridge:
         except Exception as exc:
             return {"ok": False, "error": str(exc), "devices": []}
 
-    def get_runtime_stats(self) -> dict[str, float]:
+    def health(self) -> dict[str, Any]:
+        """Poll the worker while something is playing.
+
+        running=False + crashed=True: the worker process died or stopped answering.
+        running=False:                the engine stopped by itself (e.g. after an error).
+        streams_ok=False:             a device stopped (Gigaport unplugged, capture died).
+        """
         with self._lock:
             if not self._running:
-                return {}
+                return {"running": False}
+            proc = self._proc
+            if proc is None or proc.poll() is not None:
+                code = proc.poll() if proc is not None else None
+                self._proc = None
+                self._running = False
+                self._mode = None
+                self._last_start = {}
+                self.last_error = f"The audio engine stopped unexpectedly (exit code {code})."
+                print(f"[engine_bridge] worker died (code={code})")
+                return {"running": False, "crashed": True, "error": self.last_error}
             try:
-                result = self._send({"cmd": "stats"})
-                stats = result.get("stats") or {}
-                return {k: float(v) for k, v in stats.items()}
-            except Exception:  # noqa: BLE001
-                return {}
+                # Generous timeout: the watchdog kills a worker that hangs this long, which
+                # is only right when it is really stuck (audio is broken by then anyway).
+                result = self._send({"cmd": "stats"}, timeout=8.0, spawn=False)
+            except Exception as exc:  # noqa: BLE001
+                self._running = False
+                self._mode = None
+                self._last_start = {}
+                self._kill_worker()
+                self.last_error = f"The audio engine stopped responding ({exc})."
+                print(f"[engine_bridge] {self.last_error}")
+                return {"running": False, "crashed": True, "error": self.last_error}
+            stats: dict[str, float] = {}
+            for k, v in (result.get("stats") or {}).items():
+                try:
+                    stats[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+            return {
+                "running": bool(result.get("running", True)),
+                "stats": stats,
+                "streams_ok": bool(result.get("streams_ok", True)),
+                "error": result.get("streams_error") or None,
+                "underruns": result.get("underruns") or {},
+            }
+
+    def get_runtime_stats(self) -> dict[str, float]:
+        return dict(self.health().get("stats") or {})
