@@ -330,19 +330,19 @@ function isLivePlaying(s) {
 // current positions are shown bottom-left as ready-to-paste VIZ_ZONES lines
 // and saved in localStorage. Set to false once positions are final.
 const VIZ_EDIT_MODE = false;
-const VIZ_POS_KEY = "muvi-shaker-positions-v2";  // v2: % of assets/figure.svg (544x767)
+const VIZ_POS_KEY = "muvi-shaker-positions-v2";  // v2: % of assets/bed.png (544x767)
 
 const VIZ_ZONES = [
-  { key: "audioL", zone: "left",  x: 42.4, y: 10.6, color: "#F2EFEA" },
-  { key: "audioR", zone: "right", x: 57.6, y: 10.6, color: "#F2EFEA" },
-  { key: "headL",  zone: "head",  x: 46.0, y: 22.4, color: "#E6D3B0" },
-  { key: "headR",  zone: "head",  x: 54.0, y: 22.4, color: "#E6D3B0" },
-  { key: "upperL", zone: "upper", x: 45.6, y: 32.1, color: "#D6B98F" },
-  { key: "upperR", zone: "upper", x: 54.4, y: 32.1, color: "#D6B98F" },
-  { key: "midL",   zone: "mid",   x: 45.8, y: 42.5, color: "#BC9565" },
-  { key: "midR",   zone: "mid",   x: 54.2, y: 42.5, color: "#BC9565" },
-  { key: "legL",   zone: "legs",  x: 43.0, y: 68.1, color: "#9C7748" },
-  { key: "legR",   zone: "legs",  x: 57.0, y: 68.1, color: "#9C7748" },
+  { key: "audioL", zone: "left",  x: 39.6, y: 13.8, color: "#F2EFEA" },
+  { key: "audioR", zone: "right", x: 57.4, y: 13.8, color: "#F2EFEA" },
+  { key: "headL",  zone: "head",  x: 40.1, y: 27.0, color: "#E6D3B0" },
+  { key: "headR",  zone: "head",  x: 56.1, y: 26.7, color: "#E6D3B0" },
+  { key: "upperL", zone: "upper", x: 40.5, y: 44.4, color: "#D6B98F" },
+  { key: "upperR", zone: "upper", x: 56.8, y: 44.3, color: "#D6B98F" },
+  { key: "midL",   zone: "mid",   x: 39.4, y: 58.9, color: "#BC9565" },
+  { key: "midR",   zone: "mid",   x: 57.4, y: 58.7, color: "#BC9565" },
+  { key: "legL",   zone: "legs",  x: 41.8, y: 80.2, color: "#9C7748" },
+  { key: "legR",   zone: "legs",  x: 56.3, y: 80.1, color: "#9C7748" },
   // Stereo audio channels (speakers) — driven by the music itself.
  
 ];

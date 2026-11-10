@@ -247,7 +247,7 @@ svg { display: block; }
   container-type: size;
 }
 
-/* Always exactly the figure's proportions (assets/figure.svg is 544x767), as large as the
+/* Always exactly the body image's proportions (assets/bed.png is 544x767), as large as the
    column allows — the shaker % positions in app.js are relative to this box. */
 .viz {
   position: relative;

@@ -24,5 +24,5 @@
 - volume, vibration, bass, vibration mode, speaker route, zones and Gigaport roles are remembered after a restart
 - logs for support in C:\kiosk_launcher\updates\app.log and engine.log
 - fix: Bluetooth Live didn't start while the haptics calibration had the Gigaports open
-- new look in the Gharieni style: Raleway type, black / warm grey / cream with a bronze accent, fine-line body figure, hairline sliders and lists (all screens)
+- new look in the Gharieni style: Raleway type, black / warm grey / cream with a bronze accent, hairline sliders and lists (all screens)
 - Now Playing: with a phone connected, Play/Pause, Back and Next control the music on the phone; the screen shows which phone is playing
