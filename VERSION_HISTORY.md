@@ -29,3 +29,4 @@
 - original colours for the vibration dots on the body
 - Settings: Bluetooth name - rename the tablet to "MuVi" (what phones show) with the administrator password, then restart
 - Volume, Vibration and Bass depth sliders move in 2 % steps, so a preferred level is easy to set again
+- Settings: Wi-Fi moved into Settings; haptics calibration moved to Advanced settings, which needs the service password

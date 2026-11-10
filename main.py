@@ -6,6 +6,8 @@ Bluetooth Connect opens AudioPlaybackConnection (replaces APC).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -69,6 +71,13 @@ LIVE_RETRY_MAX_S = 30.0
 # User settings that survive a restart (volume, vibration, ...). Calibration has its own file.
 SETTINGS_NAME = "muvi_settings.json"
 SETTINGS_SAVE_EVERY_S = 2.0
+
+# Settings -> Advanced settings (haptics calibration) needs the service password. Only its
+# SHA-256 is kept here. It locks again when Settings is left or after ADVANCED_UNLOCK_S idle.
+ADVANCED_PASSWORD_SHA256 = "621cd2c5c653a0da9f14796783b0e49ad1e6e4f937f37b555c14a1902d478f30"
+ADVANCED_UNLOCK_S = 10 * 60
+ADVANCED_MAX_TRIES = 5          # wrong passwords in a row before a short wait
+ADVANCED_WAIT_S = 30.0
 SLIDER_STEP = 0.02  # Volume / Vibration sliders snap to 2 % steps
 
 
@@ -216,6 +225,8 @@ class Api:
             "haptic_cal_dirty": False,
             "haptic_cal_error": None,
             "live_paused": False,  # Bluetooth Live paused on the tablet (audio + vibration silent)
+            "advanced_unlocked": False,  # Settings -> Advanced settings (password)
+            "advanced_error": None,
             "calibrating": None,  # Gigaport channel 1-8 playing the calibration tone, or None
             "calibration_busy": False,
         }
@@ -253,6 +264,9 @@ class Api:
         self._wifi_restore_at: float | None = None
         self._wifi_policy_try_at = 0.0
         self._cal_keepalive_at = 0.0
+        self._advanced_until = 0.0
+        self._advanced_fails = 0
+        self._advanced_wait_until = 0.0
         # Automatic Live start (Bluetooth session / recovery after a crash or unplug).
         self._live_retry_at = 0.0
         self._live_retry_delay = LIVE_RETRY_MIN_S
@@ -310,6 +324,9 @@ class Api:
 
     # ------------------------------------------------------------------ state --
     def get_state(self) -> dict[str, Any]:
+        if self.state.get("advanced_unlocked") and time.monotonic() > self._advanced_until:
+            print("[app] advanced settings locked (idle)")
+            self.lock_advanced()
         self._keep_calibration_tone_alive()
         self._refresh_bluetooth_link()
         self._check_engine_health()
@@ -1258,6 +1275,54 @@ class Api:
             return self._snapshot()
 
     # ------------------------------------------------------ haptics calibration --
+    # --------------------------------------------------------- advanced settings --
+    def unlock_advanced(self, password: str) -> dict[str, Any]:
+        """Check the service password for Settings -> Advanced settings."""
+        now = time.monotonic()
+        with self._lock:
+            if now < self._advanced_wait_until:
+                left = int(self._advanced_wait_until - now) + 1
+                self.state["advanced_error"] = f"Too many tries. Wait {left} s."
+                return self._snapshot()
+            digest = hashlib.sha256(str(password or "").encode("utf-8")).hexdigest()
+            if hmac.compare_digest(digest, ADVANCED_PASSWORD_SHA256):
+                self._advanced_fails = 0
+                self._advanced_until = now + ADVANCED_UNLOCK_S
+                self.state["advanced_unlocked"] = True
+                self.state["advanced_error"] = None
+                print("[app] advanced settings unlocked")
+            else:
+                self._advanced_fails += 1
+                self.state["advanced_unlocked"] = False
+                if self._advanced_fails >= ADVANCED_MAX_TRIES:
+                    self._advanced_fails = 0
+                    self._advanced_wait_until = now + ADVANCED_WAIT_S
+                    self.state["advanced_error"] = f"Too many tries. Wait {int(ADVANCED_WAIT_S)} s."
+                else:
+                    self.state["advanced_error"] = "Wrong password."
+            return self._snapshot()
+
+    def lock_advanced(self) -> dict[str, Any]:
+        """Lock Advanced settings again (leaving Settings, Lock button, idle timeout)."""
+        with self._lock:
+            was = bool(self.state.get("advanced_unlocked"))
+            self.state["advanced_unlocked"] = False
+            self.state["advanced_error"] = None
+            calibrating = self.state.get("calibrating") is not None
+        if was and calibrating:
+            self.haptic_test(None)
+        with self._lock:
+            return self._snapshot()
+
+    def _advanced_ok(self) -> bool:
+        """Calibration changes are only accepted while Advanced settings is unlocked."""
+        with self._lock:
+            if not self.state.get("advanced_unlocked"):
+                self.state["advanced_error"] = "Advanced settings are locked."
+                return False
+            self._advanced_until = time.monotonic() + ADVANCED_UNLOCK_S  # still in use
+            return True
+
     def _push_haptic_cal(self) -> None:
         with self._lock:
             cal = haptics_calibration.normalize(self.state["haptic_cal"])
@@ -1265,6 +1330,9 @@ class Api:
 
     def set_haptic_master(self, gain_db: float) -> dict[str, Any]:
         """Overall haptic level in dB (applied in the DSP before its limiter)."""
+        if not self._advanced_ok():
+            with self._lock:
+                return self._snapshot()
         with self._lock:
             cal = dict(self.state["haptic_cal"])
             cal["master_gain_db"] = gain_db
@@ -1283,6 +1351,9 @@ class Api:
         side: str | None = None,
     ) -> dict[str, Any]:
         """Edit one Gigaport channel (1-8): trim in dB, on/off, body position."""
+        if not self._advanced_ok():
+            with self._lock:
+                return self._snapshot()
         try:
             i = int(channel) - 1
         except (TypeError, ValueError):
@@ -1303,6 +1374,9 @@ class Api:
             return self._snapshot()
 
     def save_haptic_calibration(self) -> dict[str, Any]:
+        if not self._advanced_ok():
+            with self._lock:
+                return self._snapshot()
         with self._lock:
             cal = haptics_calibration.normalize(self.state["haptic_cal"])
             try:
@@ -1315,6 +1389,9 @@ class Api:
             return self._snapshot()
 
     def revert_haptic_calibration(self) -> dict[str, Any]:
+        if not self._advanced_ok():
+            with self._lock:
+                return self._snapshot()
         with self._lock:
             self.state["haptic_cal"] = haptics_calibration.load()
             self.state["haptic_cal_dirty"] = False
@@ -1337,6 +1414,9 @@ class Api:
             ch = None
         if ch is not None and not 1 <= ch <= haptics_calibration.N_CHANNELS:
             ch = None
+        if ch is not None and not self._advanced_ok():
+            with self._lock:
+                return self._snapshot()
 
         if ch is None:
             self._engine.haptic_test(None)

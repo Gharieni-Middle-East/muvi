@@ -109,6 +109,12 @@ const MockApi = (() => {
     },
     seek: async (s) => { state.position = Math.max(0, Math.min(state.track.duration, s)); return snap(); },
     previous_track: async () => { state.position = 0; return snap(); },
+    unlock_advanced: async (pw) => {
+      state.advanced_unlocked = pw === "preview";
+      state.advanced_error = state.advanced_unlocked ? null : "Wrong password.";
+      return snap();
+    },
+    lock_advanced: async () => { state.advanced_unlocked = false; return snap(); },
     set_bluetooth_name: async () => { state.device_name = { ...state.device_name, next_name: "MuVi", restart_needed: true }; return snap(); },
     restart_tablet: async () => snap(),
     media_play_pause: async () => { state.live_paused = !state.live_paused; return snap(); },
@@ -670,13 +676,23 @@ const statusIconBluetooth =
 const statusIconIdle =
   '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
+// Screens without their own sidebar item, opened from another screen.
+const SCREEN_PARENT = { wifi: "settings" };
+let currentScreen = "now-playing";
+
 function navigateToScreen(screenId) {
-  const navBtn = document.querySelector(`.nav-item[data-screen="${screenId}"]`);
+  const parent = SCREEN_PARENT[screenId] || screenId;
+  const navBtn = document.querySelector(`.nav-item[data-screen="${parent}"]`);
   if (!navBtn || !el(`screen-${screenId}`)) return;
   document.querySelectorAll(".nav-item").forEach((x) => x.classList.remove("active"));
   navBtn.classList.add("active");
   document.querySelectorAll(".screen").forEach((sc) => sc.classList.remove("active"));
   el(`screen-${screenId}`).classList.add("active");
+  // Leaving Settings locks Advanced settings again.
+  if (currentScreen === "settings" && screenId !== "settings" && lastState && lastState.advanced_unlocked) {
+    Promise.resolve(api.lock_advanced && api.lock_advanced()).then(render).catch(() => {});
+  }
+  currentScreen = screenId;
 }
 
 function shortCaptureName(name) {
@@ -839,6 +855,49 @@ document.addEventListener("input", (e) => {
   if (e.target && e.target.type === "range") syncRangeFill(e.target);
 }, true);
 
+// Settings -> Wi-Fi row and Advanced settings (password-protected haptics calibration).
+function renderSettingsLinks(s) {
+  const sub = el("settingsWifiSub");
+  const w = s.wifi;
+  if (sub && w) {
+    if (w.available === false) sub.textContent = "Not available on this tablet.";
+    else if (w.radio_on === false) sub.textContent = w.off_for_bluetooth ? "Off while a phone plays over Bluetooth." : "Off";
+    else if (w.current_ssid) sub.textContent = `Connected to ${w.current_ssid}`;
+    else sub.textContent = "Not connected";
+  }
+  const unlocked = Boolean(s.advanced_unlocked);
+  const section = el("advancedSection");
+  if (section) section.hidden = !unlocked;
+  const row = el("advancedRow");
+  if (row) row.classList.toggle("open", unlocked);
+  const advSub = el("advancedSub");
+  if (advSub) {
+    advSub.textContent = unlocked
+      ? "Unlocked. Tap to lock."
+      : "Haptics calibration. Service password required.";
+  }
+  const err = el("advError");
+  if (err && !el("advModal").hidden) {
+    err.hidden = !s.advanced_error;
+    err.textContent = s.advanced_error || "";
+    if (unlocked) closeAdvancedDialog();
+  }
+}
+
+function openAdvancedDialog() {
+  const modal = el("advModal");
+  el("advError").hidden = true;
+  el("advPassword").value = "";
+  modal.hidden = false;
+  setTimeout(() => el("advPassword").focus(), 50);  // brings up the touch keyboard
+}
+
+function closeAdvancedDialog() {
+  el("advModal").hidden = true;
+  el("advPassword").value = "";
+  el("advPassword").blur();
+}
+
 // Settings -> Bluetooth name (the tablet's Windows name, which phones show).
 function renderBtName(s) {
   const d = s.device_name;
@@ -874,6 +933,7 @@ function render(s) {
   if (!s) return;
   lastState = s;
   renderBtName(s);
+  renderSettingsLinks(s);
   requestAnimationFrame(syncAllRanges);
   if (typeof renderCalibration === "function") renderCalibration(s);
   const liveOn = isLivePlaying(s);
@@ -1461,6 +1521,35 @@ function wire() {
     } finally {
       seeking = false;
     }
+  });
+
+  el("settingsWifiRow")?.addEventListener("click", () => {
+    if (typeof openWifiScreen === "function") openWifiScreen();
+    else navigateToScreen("wifi");
+  });
+  el("wifiBackBtn")?.addEventListener("click", () => navigateToScreen("settings"));
+  el("advancedRow")?.addEventListener("click", async () => {
+    if (lastState && lastState.advanced_unlocked) {
+      if (api.lock_advanced) render(await api.lock_advanced());
+    } else {
+      openAdvancedDialog();
+    }
+  });
+  el("advCancelBtn")?.addEventListener("click", closeAdvancedDialog);
+  el("advForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const pw = el("advPassword").value;
+    if (!pw) return;
+    const next = api.unlock_advanced ? await api.unlock_advanced(pw) : null;
+    if (!next) return;
+    if (next.advanced_unlocked) {
+      closeAdvancedDialog();
+    } else {
+      el("advPassword").value = "";
+      el("advError").hidden = false;
+      el("advError").textContent = next.advanced_error || "Wrong password.";
+    }
+    render(next);
   });
 
   el("btNameBtn")?.addEventListener("click", async () => {

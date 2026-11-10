@@ -801,6 +801,49 @@ svg { display: block; }
 .hw-detail-status.ok, .hw-detail-status.live { color: var(--ok); }
 .hw-detail-status.bad { color: var(--bad); }
 
+/* Settings rows that open a sub-screen or a locked section */
+.settings-link {
+  display: flex; align-items: center; gap: 20px;
+  width: 100%; max-width: 980px;
+  margin: 0 0 20px;
+  padding: 22px 24px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.settings-link:active { background: var(--surface-2); }
+.settings-link-chev { width: 20px; height: 20px; color: var(--text-faint); flex-shrink: 0; transition: transform 0.2s; }
+.settings-link.open { border-color: rgba(188, 149, 101, 0.45); }
+.settings-link.open .settings-link-chev { transform: rotate(90deg); color: var(--accent); }
+.settings-link.open .update-icon { border-color: var(--accent); color: var(--accent); }
+#advancedRow { margin-top: 12px; }
+.advanced-section { max-width: 980px; padding-left: 24px; border-left: 1px solid var(--accent); margin: -8px 0 20px; }
+.back-link {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin: -24px 0 18px -6px; padding: 8px 6px;
+  border: none; background: transparent;
+  color: var(--accent);
+  font-size: 12px; font-weight: 500; letter-spacing: 0.2em; text-transform: uppercase;
+  cursor: pointer;
+}
+.back-link svg { width: 18px; height: 18px; }
+.adv-card { width: min(480px, calc(100vw - 48px)); }
+.adv-input {
+  width: 100%; min-height: 52px; margin-top: 22px;
+  background: transparent;
+  border: none; border-bottom: 1px solid var(--line-strong);
+  color: var(--text);
+  font-size: 20px; letter-spacing: 0.2em;
+  padding: 0 4px;
+  outline: none;
+  user-select: text;
+}
+.adv-input:focus { border-bottom-color: var(--accent); }
+.adv-error { margin-top: 12px; font-size: 13px; color: var(--bad); }
+
 /* ------------------------------------------------------------ Wi-Fi ---- */
 .wifi-message {
   max-width: 980px;

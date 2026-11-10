@@ -31,10 +31,6 @@
           <svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Bluetooth</span>
         </button>
-        <button class="nav-item" data-screen="wifi">
-          <svg viewBox="0 0 24 24"><path d="M2 8.5a15 15 0 0120 0M5 12a10 10 0 0114 0M8.5 15.5a5 5 0 017 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="19" r="1.4" fill="currentColor"/></svg>
-          <span>Wi-Fi</span>
-        </button>
         <button class="nav-item" data-screen="settings">
           <svg viewBox="0 0 24 24"><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V22a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 0 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H2a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H22a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
           <span>Settings</span>
@@ -360,6 +356,10 @@
 
       <!-- WI-FI -->
       <section class="screen" id="screen-wifi">
+        <button type="button" class="back-link" id="wifiBackBtn">
+          <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Settings</span>
+        </button>
         <header class="screen-head">
           <div>
             <h1>Wi-Fi</h1>
@@ -442,29 +442,16 @@
             <button type="button" class="btn-primary" id="btNameBtn">Set to MuVi</button>
           </div>
         </div>
-        <div class="cal-card" id="hapticsCalCard">
-          <div class="cal-card-head">
-            <div class="update-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M4 12h2l2-6 4 12 3-9 2 3h3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </div>
-            <div class="update-text">
-              <strong>Haptics calibration</strong>
-              <span class="update-status">Check where each transducer is and set its level. Applies to Haptics mode.</span>
-            </div>
-            <button type="button" class="btn-primary" id="calStartBtn">Start calibration</button>
-          </div>
-          <div class="cal-master">
-            <div class="slider-head"><span>Overall haptic level</span><span class="slider-val" id="calMasterVal">0.0 dB</span></div>
-            <input type="range" id="calMaster" min="-20" max="20" step="0.5" value="0" class="range" aria-label="Overall haptic level" />
-          </div>
-          <div class="cal-list" id="calList"></div>
-          <div class="cal-footer">
-            <span class="cal-save-state" id="calSaveState">All changes saved</span>
-            <span class="cal-error" id="calError" hidden></span>
-            <button type="button" class="btn-ghost" id="calRevertBtn">Undo</button>
-            <button type="button" class="btn-primary" id="calSaveBtn">Save</button>
-          </div>
-        </div>
+        <button type="button" class="settings-link" id="settingsWifiRow">
+          <span class="update-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M2 8.5a15 15 0 0120 0M5 12a10 10 0 0114 0M8.5 15.5a5 5 0 017 0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="19" r="1.4" fill="currentColor"/></svg>
+          </span>
+          <span class="update-text">
+            <strong>Wi-Fi</strong>
+            <span class="update-status" id="settingsWifiSub">—</span>
+          </span>
+          <svg class="settings-link-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <ul class="hw-detail-list" id="hwDetailList" aria-label="Hardware status">
           <li class="hw-detail-row bad" id="hwRowGigaport">
             <span class="hw-detail-icon" aria-hidden="true">
@@ -506,6 +493,42 @@
             <span class="hw-detail-status bad" id="hwRowBatteryStatus">—</span>
           </li>
         </ul>
+
+        <button type="button" class="settings-link" id="advancedRow">
+          <span class="update-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 11V8a4 4 0 018 0v3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </span>
+          <span class="update-text">
+            <strong>Advanced settings</strong>
+            <span class="update-status" id="advancedSub">Haptics calibration. Service password required.</span>
+          </span>
+          <svg class="settings-link-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="advanced-section" id="advancedSection" hidden>
+        <div class="cal-card" id="hapticsCalCard">
+          <div class="cal-card-head">
+            <div class="update-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 12h2l2-6 4 12 3-9 2 3h3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+            <div class="update-text">
+              <strong>Haptics calibration</strong>
+              <span class="update-status">Check where each transducer is and set its level. Applies to Haptics mode.</span>
+            </div>
+            <button type="button" class="btn-primary" id="calStartBtn">Start calibration</button>
+          </div>
+          <div class="cal-master">
+            <div class="slider-head"><span>Overall haptic level</span><span class="slider-val" id="calMasterVal">0.0 dB</span></div>
+            <input type="range" id="calMaster" min="-20" max="20" step="0.5" value="0" class="range" aria-label="Overall haptic level" />
+          </div>
+          <div class="cal-list" id="calList"></div>
+          <div class="cal-footer">
+            <span class="cal-save-state" id="calSaveState">All changes saved</span>
+            <span class="cal-error" id="calError" hidden></span>
+            <button type="button" class="btn-ghost" id="calRevertBtn">Undo</button>
+            <button type="button" class="btn-primary" id="calSaveBtn">Save</button>
+          </div>
+        </div>
+        </div>
       </section>
     </main>
   </div>
@@ -518,6 +541,20 @@
       <pre class="modal-notes" id="modalNotes" hidden></pre>
       <div class="modal-actions" id="modalActions"></div>
     </div>
+  </div>
+
+  <!-- Advanced settings password -->
+  <div class="modal" id="advModal" hidden>
+    <form class="modal-card adv-card" id="advForm" role="dialog" aria-modal="true" aria-labelledby="advTitle" autocomplete="off">
+      <h2 id="advTitle">Advanced settings</h2>
+      <p class="modal-text">Enter the service password.</p>
+      <input type="password" class="adv-input" id="advPassword" aria-label="Service password" autocomplete="off" />
+      <p class="adv-error" id="advError" hidden></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" id="advCancelBtn">Cancel</button>
+        <button type="submit" class="btn-primary" id="advUnlockBtn">Unlock</button>
+      </div>
+    </form>
   </div>
 
   <!-- Haptics calibration: one transducer at a time -->
