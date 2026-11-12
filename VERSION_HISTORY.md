@@ -31,3 +31,4 @@
 - Volume, Vibration and Bass depth sliders move in 2 % steps, so a preferred level is easy to set again
 - Settings: Wi-Fi moved into Settings; haptics calibration and the Gigaport roles swap moved to Advanced settings, which needs the service password
 - two Gigaports again: Gigaport 2 plays the music (CH1-2 headphones, CH3-4 speakers), choose Headphones / Speakers / Both on Now Playing; the Behringer UFO202 is only the AUX input (Settings shows it as "AUX input")
+- new pages: Bluetooth (phone list, or the player once a phone is connected), AUX (plays the Behringer AUX input only while this page is open), Programs (Demo as a program card; a program plays only while Programs is open)

@@ -162,6 +162,7 @@ def _pick_capture(
     *,
     vibration_overlay: bool,
     prefer_bluetooth: bool = False,
+    force_aux: bool = False,
     log: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Return (capture_device, mode) where mode is 'aux' | 'cable' | 'overlay'.
@@ -179,6 +180,14 @@ def _pick_capture(
             return gigaport_lb, "overlay"
 
     aux = pick_aux_capture_device()
+
+    if force_aux:
+        # AUX page: only the line-in interface (Behringer UFO202), never the phone on CABLE.
+        if aux is None:
+            raise RuntimeError(
+                "AUX interface not found. Plug in the Behringer interface (UFO202) and set it to LINE."
+            )
+        return aux, "aux"
 
     if prefer_bluetooth:
         try:
@@ -280,13 +289,14 @@ def start_live_audio(
     synthetic_vibro: bool = False,
     synthetic_type_id: str = "sine",
     prefer_bluetooth: bool = False,
+    force_aux: bool = False,
     speaker_route: SpeakerRoute = "headphones",
     vibration_mode: VibrationMode = "haptics",
     vibration_output_index: int | None = None,
     audio_output_index: int | None = None,
     roles_flipped: bool = False,
 ) -> dict[str, Any]:
-    """Start Live: BT session → CABLE; else AUX if present; else CABLE."""
+    """Start Live: AUX page → AUX only; BT session → CABLE; else AUX if present; else CABLE."""
     # Release any previous Gigaport stream BEFORE probing — a held exclusive
     # lock makes check_output_settings fail on every endpoint (WDM-KS or WASAPI).
     if _live_engine.is_active:
@@ -298,7 +308,8 @@ def start_live_audio(
 
     capture, mode = _pick_capture(
         vibration_overlay=vibration_overlay,
-        prefer_bluetooth=prefer_bluetooth,
+        prefer_bluetooth=prefer_bluetooth and not force_aux,
+        force_aux=force_aux,
         log=True,
     )
 

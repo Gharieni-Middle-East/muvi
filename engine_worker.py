@@ -90,6 +90,7 @@ def main() -> int:
                     cutoff_hz=float(msg.get("cutoff_hz", msg.get("highpass_hz", 200.0))),
                     vibration_overlay=False,
                     prefer_bluetooth=bool(msg.get("prefer_bluetooth", False)),
+                    force_aux=bool(msg.get("force_aux", False)),
                     speaker_route=str(msg.get("speaker_route", "headphones")),
                     vibration_mode=str(msg.get("vibration_mode", "haptics")),
                     vibration_output_index=msg.get("vibration_output_index"),

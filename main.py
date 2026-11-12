@@ -226,7 +226,11 @@ class Api:
             "haptic_cal": haptics_calibration.load(),
             "haptic_cal_dirty": False,
             "haptic_cal_error": None,
-            "live_paused": False,  # Bluetooth Live paused on the tablet (audio + vibration silent)
+            "live_paused": False,  # Live paused on the tablet (audio + vibration silent)
+            # Page open in the UI. Each page owns its source: 'aux' plays only the UFO202
+            # input, 'programs' plays a program only while open; elsewhere a connected
+            # phone plays.
+            "active_page": "bluetooth",
             "advanced_unlocked": False,  # Settings -> Advanced settings (password)
             "advanced_error": None,
             "calibrating": None,  # Gigaport channel 1-8 playing the calibration tone, or None
@@ -334,6 +338,7 @@ class Api:
         self._keep_calibration_tone_alive()
         self._refresh_bluetooth_link()
         self._check_engine_health()
+        self._enforce_page_sources()
         self._maybe_autostart_live()
         self._apply_wifi_policy()
         self._refresh_media()
@@ -667,18 +672,64 @@ class Api:
                 self.state["haptic_cal_error"] = why
                 self._cal_started_engine = False
 
+    def set_active_page(self, page: str) -> dict[str, Any]:
+        """The UI reports which page is open (bluetooth, aux, programs, settings)."""
+        page = str(page or "").strip().lower()
+        if page not in ("bluetooth", "aux", "programs", "settings"):
+            page = "bluetooth"
+        with self._lock:
+            old = self.state.get("active_page")
+            self.state["active_page"] = page
+            if page != old:
+                self.state["live_paused"] = False
+                self._live_retry_at = 0.0
+                self._live_retry_delay = LIVE_RETRY_MIN_S
+        if page != old:
+            print(f"[app] page: {old} -> {page}")
+        self._enforce_page_sources()
+        with self._lock:
+            return self._snapshot()
+
+    def _enforce_page_sources(self) -> None:
+        """AUX plays only on the AUX page, a program only on the Programs page."""
+        with self._lock:
+            page = self.state.get("active_page")
+            playing = bool(self.state.get("playing"))
+            mode = self.state.get("live_mode")
+            busy = bool(self.state.get("play_busy") or self.state.get("calibration_busy"))
+        if not playing or busy:
+            return
+        if (mode == "aux" and page != "aux") or (mode == "demo" and page != "programs"):
+            print(f"[app] leaving the {mode} page - stopping {mode}")
+            self.stop_live()
+
     def _maybe_autostart_live(self) -> None:
-        """Start Live when a phone is connected (or an AUX session must recover). Runs in a
-        thread so the UI poll never waits for the Gigaports; retries back off 2 s → 30 s."""
+        """Start the source the open page owns, in a thread (the UI poll never waits for the
+        Gigaports); retries back off 2 s -> 30 s.
+
+        AUX page        -> AUX (UFO202 line-in), even if a phone is connected.
+        Programs page   -> a program the user started keeps playing; otherwise the phone.
+        Other pages     -> the connected phone (Bluetooth Live).
+        """
         with self._lock:
             bt = self.state["bluetooth"]
+            page = self.state.get("active_page")
             phone = bool(bt.get("connected_id")) and not bt.get("connecting_id")
-            recover = self._live_recover and not bt.get("connected_id") and not bt.get("waiting_id")
             playing = bool(self.state.get("playing"))
             live_mode = self.state.get("live_mode")
             busy = bool(self.state.get("play_busy") or self.state.get("calibration_busy"))
-            needs = (not playing) or live_mode == "demo"
-            if not (phone or recover) or not needs or busy or self._autostart_busy:
+            if busy or self._autostart_busy:
+                return
+            if page == "aux":
+                source = "aux"
+                needs = (not playing) or live_mode != "aux"
+            elif phone:
+                source = None
+                program_on = page == "programs" and playing and live_mode == "demo"
+                needs = not program_on and ((not playing) or live_mode not in ("cable",))
+            else:
+                return
+            if not needs or live_mode == "calibration":
                 return
             now = time.monotonic()
             if now < self._live_retry_at:
@@ -687,8 +738,10 @@ class Api:
 
         def _work() -> None:
             try:
-                print("[app] starting Live " + ("(Bluetooth connected)" if phone else "(recovering)"))
-                snap = self.start_live()
+                print("[app] starting Live " + ("(AUX page)" if source == "aux" else "(Bluetooth connected)"))
+                if playing and live_mode in ("aux", "cable", "demo"):
+                    self.stop_live()  # switch source: the engine has to change its input
+                snap = self.start_live(source)
                 ok = bool(snap.get("playing"))
             except Exception as exc:  # noqa: BLE001
                 print(f"[app] auto-start Live failed: {exc}")
@@ -867,8 +920,9 @@ class Api:
         return snap
 
     # -------------------------------------------------------- Start / Stop Live --
-    def start_live(self) -> dict[str, Any]:
-        """Same as old PyQt Start Live button."""
+    def start_live(self, source: str | None = None) -> dict[str, Any]:
+        """Start Live. source="aux" = the AUX page: only the UFO202 line-in, never the phone."""
+        force_aux = source == "aux"
         with self._lock:
             if self.state["play_busy"]:
                 return self._snapshot()
@@ -899,10 +953,10 @@ class Api:
                     return self._snapshot()
 
             with self._lock:
-                prefer_bt = bool(self.state["bluetooth"].get("connected_id"))
+                prefer_bt = bool(self.state["bluetooth"].get("connected_id")) and not force_aux
                 self._refresh_live_input_probe()
                 live_input = dict(self.state.get("live_input") or {})
-            if not live_input.get("ready"):
+            if not force_aux and not live_input.get("ready"):
                 with self._lock:
                     self.state["engine_error"] = live_input.get("message")
                     self.state["playing"] = False
@@ -915,7 +969,8 @@ class Api:
                 volume=self.state["volume"],
                 vibration=self.state["vibration"],
                 cutoff_hz=self.state["cutoff_hz"],
-                prefer_bluetooth=bool(self.state["bluetooth"].get("connected_id")),
+                prefer_bluetooth=prefer_bt,
+                force_aux=force_aux,
                 speaker_route=self.state.get("speaker_route", "headphones"),
                 vibration_mode=self.state.get("vibration_mode", "haptics"),
                 vibration_output_index=self.state.get("vibration_output_index"),
@@ -995,6 +1050,11 @@ class Api:
             playing = self.state["playing"]
             is_demo = self.state.get("live_mode") == "demo"
             bt_connected = bool(self.state["bluetooth"].get("connected_id"))
+            page = self.state.get("active_page")
+            aux_on = playing and self.state.get("live_mode") == "aux"
+        if page == "aux":
+            # AUX page: Play/Pause pauses on the tablet; never starts the phone.
+            return self.media_play_pause() if aux_on else self.start_live("aux")
         if bt_connected:
             if playing and not is_demo:
                 # Live already runs for the phone: Play/Pause controls the phone's music.
@@ -1150,8 +1210,10 @@ class Api:
         the vibration are silenced instead; the engine keeps running, so resume is instant."""
         with self._lock:
             phone = bool(self.state["bluetooth"].get("connected_id"))
-            live = bool(self.state.get("playing")) and self.state.get("live_mode") == "cable"
-        if not phone or not live:
+            mode = self.state.get("live_mode")
+            playing = bool(self.state.get("playing"))
+            live = playing and (mode == "aux" or (phone and mode == "cable"))
+        if not live:
             return self.toggle_play()
         with self._lock:
             self.state["live_paused"] = not bool(self.state.get("live_paused"))
@@ -1837,9 +1899,12 @@ class Api:
             if connected:
                 self._bt_status_errors = 0
                 self._bt_idle_since = None
-                print("[app] Bluetooth connected - starting Live")
+                # Start the phone's audio right away, unless the open page owns another
+                # source (AUX page, a running program): same rules as every poll.
+                print("[app] Bluetooth connected")
+                self._live_retry_at = 0.0
                 try:
-                    self.start_live()
+                    self._maybe_autostart_live()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[app] BT connect auto-start Live failed: {exc}")
             elif waiting:

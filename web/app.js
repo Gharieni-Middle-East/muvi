@@ -109,6 +109,13 @@ const MockApi = (() => {
     },
     seek: async (s) => { state.position = Math.max(0, Math.min(state.track.duration, s)); return snap(); },
     previous_track: async () => { state.position = 0; return snap(); },
+    set_active_page: async (page) => {
+      state.active_page = page;
+      if (page === "aux") { state.playing = true; state.live_mode = "aux"; state.capture_name = "Line (USB Audio CODEC)"; }
+      else if (state.live_mode === "aux") { state.playing = false; state.live_mode = null; }
+      if (page !== "programs" && state.live_mode === "demo") { state.playing = false; state.live_mode = null; }
+      return snap();
+    },
     unlock_advanced: async (pw) => {
       state.advanced_unlocked = pw === "preview";
       state.advanced_error = state.advanced_unlocked ? null : "Wrong password.";
@@ -676,23 +683,80 @@ const statusIconBluetooth =
 const statusIconIdle =
   '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
-// Screens without their own sidebar item, opened from another screen.
-const SCREEN_PARENT = { wifi: "settings" };
-let currentScreen = "now-playing";
+// Pages (sidebar) and the screen each one shows. Every page owns its sound source
+// (main.py set_active_page): AUX plays only on the AUX page, a program only on Programs.
+//   bluetooth -> device list, or the player once a phone is connected
+//   aux       -> the player (AUX input)
+//   programs  -> program grid, or a program's player (Demo)
+//   settings  -> Settings, or Wi-Fi
+let currentNav = "bluetooth";
+const subView = { programs: "programs", settings: "settings" };
+let shownScreen = "bluetooth";
 
-function navigateToScreen(screenId) {
-  const parent = SCREEN_PARENT[screenId] || screenId;
-  const navBtn = document.querySelector(`.nav-item[data-screen="${parent}"]`);
-  if (!navBtn || !el(`screen-${screenId}`)) return;
-  document.querySelectorAll(".nav-item").forEach((x) => x.classList.remove("active"));
-  navBtn.classList.add("active");
+function screenForNav(nav, s) {
+  if (nav === "bluetooth") return s && s.bluetooth && s.bluetooth.connected_id ? "now-playing" : "bluetooth";
+  if (nav === "aux") return "now-playing";
+  if (nav === "programs") return subView.programs;
+  return subView.settings;
+}
+
+function applyScreen() {
+  const id = screenForNav(currentNav, lastState);
+  document.querySelectorAll(".nav-item").forEach((x) => x.classList.toggle("active", x.dataset.screen === currentNav));
+  if (id === shownScreen || !el(`screen-${id}`)) return;
   document.querySelectorAll(".screen").forEach((sc) => sc.classList.remove("active"));
-  el(`screen-${screenId}`).classList.add("active");
-  // Leaving Settings locks Advanced settings again.
-  if (currentScreen === "settings" && screenId !== "settings" && lastState && lastState.advanced_unlocked) {
-    Promise.resolve(api.lock_advanced && api.lock_advanced()).then(render).catch(() => {});
+  el(`screen-${id}`).classList.add("active");
+  shownScreen = id;
+}
+
+function setNav(nav) {
+  const prev = currentNav;
+  currentNav = nav;
+  applyScreen();
+  if (prev !== nav) {
+    // Leaving Settings locks Advanced settings again.
+    if (prev === "settings" && lastState && lastState.advanced_unlocked && api.lock_advanced) {
+      Promise.resolve(api.lock_advanced()).then(render).catch(() => {});
+    }
+    if (api.set_active_page) Promise.resolve(api.set_active_page(nav)).then(render).catch(() => {});
   }
-  currentScreen = screenId;
+}
+
+// Also accepts the older screen names used around the app (now-playing, demo, wifi).
+function navigateToScreen(target) {
+  if (target === "now-playing") return setNav(currentNav === "aux" ? "aux" : "bluetooth");
+  if (target === "demo") { subView.programs = "demo"; return setNav("programs"); }
+  if (target === "programs") { subView.programs = "programs"; return setNav("programs"); }
+  if (target === "wifi") { subView.settings = "wifi"; return setNav("settings"); }
+  if (target === "settings") { subView.settings = "settings"; return setNav("settings"); }
+  if (target === "bluetooth" || target === "aux") return setNav(target);
+}
+
+// ------------------------------------------------------------------ programs --
+// Programs page. Each program: square artwork, title below; tap opens its player.
+const PROGRAMS = [
+  { id: "demo", title: "Demo", artwork: "assets/program-demo.svg", screen: "demo" },
+];
+
+function buildPrograms() {
+  const grid = el("programGrid");
+  if (!grid || grid.dataset.built) return;
+  grid.dataset.built = "1";
+  PROGRAMS.forEach((p) => {
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <button type="button" class="program-card" data-program="${p.id}">
+        <span class="program-art"><img src="${p.artwork}" alt="" /><span class="program-playing" hidden>Playing</span></span>
+        <span class="program-title">${p.title}</span>
+      </button>`;
+    li.querySelector("button").addEventListener("click", () => navigateToScreen(p.screen));
+    grid.appendChild(li);
+  });
+}
+
+function renderPrograms(s) {
+  const demoOn = Boolean(s && s.playing && s.live_mode === "demo");
+  document.querySelectorAll('.program-card[data-program="demo"] .program-playing').forEach((b) => { b.hidden = !demoOn; });
 }
 
 function shortCaptureName(name) {
@@ -945,6 +1009,8 @@ function renderBtName(s) {
 function render(s) {
   if (!s) return;
   lastState = s;
+  applyScreen();
+  renderPrograms(s);
   renderBtName(s);
   renderSettingsLinks(s);
   requestAnimationFrame(syncAllRanges);
@@ -976,9 +1042,18 @@ function render(s) {
   const canStartLive = liveInputReady;
 
   // Now playing (Live / AUX / Bluetooth only)
-  el("npTitle").textContent = demoOn ? "Ready" : s.track.title;
-  el("npArtist").textContent = demoOn ? "Phone audio" : s.track.artist;
-  const albumText = demoOn ? "" : (s.track.album || "");
+  const auxCtx = currentNav === "aux";
+  const auxOn = Boolean(s.playing) && s.live_mode === "aux";
+  if (auxCtx) {
+    el("npTitle").textContent = "AUX";
+    el("npArtist").textContent = auxOn
+      ? (shortCaptureName(s.capture_name) || "Behringer interface")
+      : "Phone on the AUX cable";
+  } else {
+    el("npTitle").textContent = demoOn ? "Ready" : s.track.title;
+    el("npArtist").textContent = demoOn ? "Phone audio" : s.track.artist;
+  }
+  const albumText = demoOn || auxCtx ? "" : (s.track.album || "");
   el("npAlbum").textContent = albumText;
   el("npAlbum").hidden = !albumText;
 
@@ -998,7 +1073,12 @@ function render(s) {
   // Play/Pause pauses on the tablet (headphones + vibration silent, phone keeps playing) and
   // Back/Next are hidden. AUX: Play = Start/Stop Live.
   const phonePlaying = !s.live_paused;
-  if (btSession) {
+  if (auxCtx) {
+    // AUX page: AUX starts by itself; Play/Pause pauses it on the tablet.
+    playBtn.hidden = false;
+    playBtn.disabled = busy;
+    playBtn.title = auxOn && phonePlaying ? "Pause" : "Play";
+  } else if (btSession) {
     playBtn.hidden = false;
     playBtn.disabled = !phoneLinked || !liveOn;
     playBtn.title = phonePlaying ? "Pause on the tablet" : "Resume";
@@ -1012,21 +1092,27 @@ function render(s) {
   playBtn.classList.toggle("disabled", playBtn.disabled && !busy);
   playBtn.classList.toggle("busy", busy && !btSession);
   playBtn.setAttribute("aria-busy", busy && !btSession ? "true" : "false");
-  el("playIcon").innerHTML = busy && !btSession
-    ? busyIcon
-    : ((btSession ? phonePlaying : liveOn) ? pauseIcon : playIconSvg);
+  const showPause = auxCtx ? (auxOn && phonePlaying) : (btSession ? phonePlaying : liveOn);
+  el("playIcon").innerHTML = busy && !btSession && !auxOn ? busyIcon : (showPause ? pauseIcon : playIconSvg);
   const source = el("npSource");
   if (source) {
     const phoneName = connected ? connected.name : "";
-    source.textContent = btSession
-      ? (phoneName ? `Bluetooth · ${phoneName}` : "Bluetooth")
-      : (liveOn ? "AUX" : "");
+    source.textContent = auxCtx
+      ? "AUX input"
+      : btSession ? (phoneName ? `Bluetooth · ${phoneName}` : "Bluetooth") : (liveOn ? "AUX" : "");
   }
+  const npDisc = el("npDisconnectBtn");
+  if (npDisc) npDisc.hidden = auxCtx || !phoneLinked;
   const howto = el("howto");
   if (howto) howto.hidden = btSession || liveOn;
 
   const hint = el("liveHint");
-  if (hint) {
+  if (hint && auxCtx) {
+    if (auxOn && s.live_paused) hint.textContent = "Paused on the tablet.";
+    else if (auxOn) hint.textContent = "Playing what comes in on the AUX cable.";
+    else if (s.engine_error && !busy) hint.textContent = s.engine_error;
+    else hint.textContent = "Starting AUX…";
+  } else if (hint) {
     if (btSession && liveOn && s.live_paused) {
       hint.textContent = "Paused on the tablet. The phone keeps playing.";
     } else if (btSession && liveOn) {
@@ -1062,8 +1148,8 @@ function render(s) {
   const nextBtn = el("nextBtn");
   // The phone can't be skipped from the tablet (Windows limitation): hide Back/Next for it.
   const phoneSession = Boolean(s.bluetooth && (s.bluetooth.connected_id || s.bluetooth.waiting_id));
-  prevBtn.hidden = phoneSession;
-  nextBtn.hidden = phoneSession;
+  prevBtn.hidden = phoneSession || currentNav === "aux";
+  nextBtn.hidden = phoneSession || currentNav === "aux";
   prevBtn.disabled = demoOn || phoneSession || !media.can_prev;
   nextBtn.disabled = demoOn || phoneSession || !media.can_next;
   prevBtn.classList.toggle("disabled", prevBtn.disabled);
@@ -1198,6 +1284,7 @@ function render(s) {
     if (isAuxLive) {
       statusTitle = "Now Playing";
       statusSub = hasSignal ? "AUX" : "Waiting for audio…";
+      navigateTarget = "aux";
     } else if (mode === "cable") {
       statusTitle = "Now Playing";
       statusSub = hasSignal ? "Bluetooth" : "Waiting for audio…";
@@ -1491,6 +1578,12 @@ function wire() {
 
   el("playBtn").addEventListener("click", async () => {
     if (playClickLock) return;
+    // AUX page: the backend knows the page (start AUX, or pause/resume it).
+    if (currentNav === "aux") {
+      playClickLock = true;
+      try { render(await api.toggle_play()); } finally { playClickLock = false; }
+      return;
+    }
     // Phone connected: pause / resume the music on the phone.
     if (lastState.bluetooth && lastState.bluetooth.connected_id) {
       if (el("playBtn").disabled || !api.media_play_pause) return;
@@ -1543,6 +1636,10 @@ function wire() {
     else navigateToScreen("wifi");
   });
   el("wifiBackBtn")?.addEventListener("click", () => navigateToScreen("settings"));
+  el("demoBackBtn")?.addEventListener("click", () => navigateToScreen("programs"));
+  el("npDisconnectBtn")?.addEventListener("click", async () => {
+    if (api.disconnect_device) render(await api.disconnect_device());
+  });
   el("advancedRow")?.addEventListener("click", async () => {
     if (lastState && lastState.advanced_unlocked) {
       if (api.lock_advanced) render(await api.lock_advanced());
@@ -1753,6 +1850,10 @@ async function boot() {
   buildVibZoneRows("demoVibZoneRows");
   wire();
   initViz();
+  buildPrograms();
+  if (api.set_active_page) {
+    try { await api.set_active_page(currentNav); } catch (e) {}
+  }
   render(await api.get_state());
   setInterval(async () => {
     if (!seeking && !demoSeeking) render(await api.get_state());

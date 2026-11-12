@@ -140,6 +140,7 @@ class EngineBridge:
         cutoff_hz: float = 200.0,
         highpass_hz: float | None = None,
         prefer_bluetooth: bool = False,
+        force_aux: bool = False,
         speaker_route: str = "headphones",
         vibration_mode: str = "haptics",
         vibration_output_index: int | None = None,
@@ -157,6 +158,7 @@ class EngineBridge:
                 self._running
                 and self._mode == "live"
                 and prefer_bluetooth
+                and not force_aux
                 and self._last_start.get("mode") == "cable"
                 and self._worker_alive()
             ):
@@ -173,6 +175,7 @@ class EngineBridge:
                         "vibration": float(vibration),
                         "cutoff_hz": float(cutoff_hz),
                         "prefer_bluetooth": bool(prefer_bluetooth),
+                        "force_aux": bool(force_aux),
                         "speaker_route": str(speaker_route),
                         "vibration_mode": str(vibration_mode),
                         "vibration_output_index": vibration_output_index,

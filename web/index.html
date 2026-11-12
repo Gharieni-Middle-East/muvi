@@ -19,17 +19,17 @@
       </div>
 
       <nav class="nav">
-        <button class="nav-item active" data-screen="now-playing">
-          <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="16" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-          <span>Now Playing</span>
-        </button>
-        <button class="nav-item" data-screen="demo">
-          <svg viewBox="0 0 24 24"><path d="M12 3v10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8 7l4-4 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><rect x="4" y="14" width="16" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-          <span>Demo</span>
-        </button>
-        <button class="nav-item" data-screen="bluetooth">
+        <button class="nav-item active" data-screen="bluetooth">
           <svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Bluetooth</span>
+        </button>
+        <button class="nav-item" data-screen="aux">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h7"/><rect x="10" y="9" width="6" height="6" rx="1"/><path d="M16 12h5"/><path d="M6 8v8"/></svg>
+          <span>AUX</span>
+        </button>
+        <button class="nav-item" data-screen="programs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="1"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1"/></svg>
+          <span>Programs</span>
         </button>
         <button class="nav-item" data-screen="settings">
           <svg viewBox="0 0 24 24"><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V22a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 0 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H2a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H22a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
@@ -72,7 +72,7 @@
     <!-- Main -->
     <main class="main">
       <!-- NOW PLAYING -->
-      <section class="screen active" id="screen-now-playing">
+      <section class="screen" id="screen-now-playing">
         <div class="np-backdrop" id="npBackdrop"></div>
 
         <div class="np">
@@ -82,29 +82,14 @@
                 <img class="viz-bed" src="assets/bed.png" alt="" />
               </div>
             </div>
-            <div class="howto" id="howto">
-              <div class="howto-card">
-                <h3>Bluetooth</h3>
-                <ol>
-                  <li>Open <strong>Bluetooth</strong> and tap <strong>Connect</strong> on your phone</li>
-                  <li>New phone: <strong>Scan</strong>, tap <strong>Pair</strong>, confirm on the phone</li>
-                  <li>Play music on the phone — it starts here by itself</li>
-                </ol>
-              </div>
-              <div class="howto-card">
-                <h3>AUX</h3>
-                <ol>
-                  <li>Plug the phone into the AUX input</li>
-                  <li>Play music on the phone</li>
-                  <li>Press <strong>Play</strong> here</li>
-                </ol>
-              </div>
-            </div>
           </div>
 
           <div class="np-info">
             <div class="np-meta">
-              <p class="np-eyebrow" id="npSource"></p>
+              <div class="np-source-row">
+                <p class="np-eyebrow" id="npSource"></p>
+                <button type="button" class="btn-ghost sm" id="npDisconnectBtn" hidden>Disconnect</button>
+              </div>
               <h1 class="np-title" id="npTitle">—</h1>
               <p class="np-artist" id="npArtist">—</p>
               <p class="np-album" id="npAlbum" hidden></p>
@@ -201,6 +186,10 @@
 
       <!-- DEMO — same layout/controls as Now Playing; plays assets/demo.wav -->
       <section class="screen" id="screen-demo">
+        <button type="button" class="back-link np-back" id="demoBackBtn">
+          <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Programs</span>
+        </button>
         <div class="np-backdrop" id="demoBackdrop"></div>
 
         <div class="np">
@@ -319,8 +308,19 @@
         </div>
       </section>
 
+      <!-- PROGRAMS -->
+      <section class="screen" id="screen-programs">
+        <header class="screen-head">
+          <div>
+            <h1>Programs</h1>
+            <p class="subtle">Choose a program to play on the lounger.</p>
+          </div>
+        </header>
+        <ul class="program-grid" id="programGrid" aria-label="Programs"></ul>
+      </section>
+
       <!-- BLUETOOTH -->
-      <section class="screen" id="screen-bluetooth">
+      <section class="screen active" id="screen-bluetooth">
         <header class="screen-head">
           <div>
             <h1>Bluetooth</h1>
