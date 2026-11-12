@@ -32,5 +32,5 @@
 - Settings: Wi-Fi moved into Settings; haptics calibration and the Gigaport roles swap moved to Advanced settings, which needs the service password
 - two Gigaports again: Gigaport 2 plays the music (CH1-2 headphones, CH3-4 speakers), choose Headphones / Speakers / Both on Now Playing; the Behringer UFO202 is only the AUX input (Settings shows it as "AUX input")
 - new pages: Bluetooth (phone list, or the player once a phone is connected), AUX (plays the Behringer AUX input only while this page is open), Programs (Demo as a program card; a program plays only while Programs is open)
-- Advanced settings: Haptics character - Dynamics (Muvi / Aurasens original) and Layout (Body zones / Aurasens order) to compare with Aurasens, saved and applied while playing
+- Advanced settings: Haptics character - Dynamics (MUVI / MUVI+) and Layout (Body zones / Haptics order), saved and applied while playing
 - Programs: the Aurasens programs (Wellness - Elements, Massage - De-Stress, Bonus, Bespoke experiences, Demo) in categories with artwork, artist and length. They play their own vibration: Gigaport outputs 1-8 get Aurasens channels 1, 3, 14, 16, 23, 24, 27, 28, with the music on the headphones/speakers. The programs are copied onto the tablet separately (C:\kiosk_launcher\programs), not part of the update
