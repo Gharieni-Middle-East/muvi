@@ -887,7 +887,7 @@ function renderSettingsLinks(s) {
   if (advSub) {
     advSub.textContent = unlocked
       ? "Unlocked. Tap to lock."
-      : "Haptics calibration. Service password required.";
+      : "Haptics calibration and Gigaport roles. Service password required.";
   }
   const err = el("advError");
   if (err && !el("advModal").hidden) {

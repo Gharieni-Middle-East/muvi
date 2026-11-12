@@ -492,13 +492,6 @@
             <span class="hw-detail-status bad" id="hwRowAuxStatus">Not connected</span>
           </li>
         </ul>
-        <div class="hw-swap-card" id="gigaportSwapCard" hidden>
-          <div class="hw-swap-text">
-            <strong>Gigaport roles</strong>
-            <p class="subtle" id="gigaportSwapHint">Swap which unit drives vibration vs headphones.</p>
-          </div>
-          <button type="button" class="btn-ghost" id="swapGigaportsBtn">Swap</button>
-        </div>
         <ul class="hw-detail-list" aria-label="Battery status">
           <li class="hw-detail-row hw-detail-battery" id="hwRowBattery" hidden>
             <span class="hw-detail-icon" aria-hidden="true">
@@ -518,11 +511,18 @@
           </span>
           <span class="update-text">
             <strong>Advanced settings</strong>
-            <span class="update-status" id="advancedSub">Haptics calibration. Service password required.</span>
+            <span class="update-status" id="advancedSub">Haptics calibration and Gigaport roles. Service password required.</span>
           </span>
           <svg class="settings-link-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <div class="advanced-section" id="advancedSection" hidden>
+        <div class="hw-swap-card" id="gigaportSwapCard" hidden>
+          <div class="hw-swap-text">
+            <strong>Gigaport roles</strong>
+            <p class="subtle" id="gigaportSwapHint">Swap which unit drives vibration vs headphones.</p>
+          </div>
+          <button type="button" class="btn-ghost" id="swapGigaportsBtn">Swap</button>
+        </div>
         <div class="cal-card" id="hapticsCalCard">
           <div class="cal-card-head">
             <div class="update-icon" aria-hidden="true">

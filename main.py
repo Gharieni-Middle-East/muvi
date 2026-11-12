@@ -1515,6 +1515,9 @@ class Api:
         If Live or Demo is already running, restart it automatically so the new
         roles apply without the user pressing Stop/Play.
         """
+        if not self._advanced_ok():  # Settings -> Advanced settings (password)
+            with self._lock:
+                return self._snapshot()
         with self._lock:
             self.state["gigaport_roles_flipped"] = not bool(
                 self.state.get("gigaport_roles_flipped")
