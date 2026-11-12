@@ -40,6 +40,17 @@ Console:
 - Seek / restart work on the demo file
 - Starting Demo stops Live (and vice versa) so ASIO isn’t contested
 
+### Aurasens programs (Programs page)
+- The programs are **not in the repo or the release zip** (about 4.5 GB, and Aurasens content).
+  Copy the prepared `muvi-programs` folder onto the tablet as **`C:\kiosk_launcher\programs`**
+  (`programs.json` + `<Title>.aif` + `<Title>.jpg`). The Programs page reads it each time it opens.
+  Other folder: set `MUVI_PROGRAMS_DIR`.
+- Each `.aif` is an original Aurasens track (2 ch, 48 kHz, 24-bit: 16-bit audio + 8-bit haptic
+  data, 32 slots at 1500 Hz). `audio/aurasens_program.py` decodes it from disk block by block.
+- Headphones/speakers get the audio. The **vibration Gigaport outputs 1–8 get Aurasens slots
+  1, 3, 14, 16, 23, 24, 27, 28** (`PROGRAM_SLOT_MAP`; `"slot_map"` in `programs.json` overrides it).
+  The haptics DSP is bypassed; calibration trims, on/off, zone switches and the Vibration slider still apply.
+
 
 ## 4) Haptics calibration (Settings)
 Same model as the Raspberry Pi app: per-transducer level (dB), on/off and body position, plus an

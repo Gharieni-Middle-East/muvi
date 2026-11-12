@@ -92,14 +92,34 @@ const MockApi = (() => {
       last = performance.now();
       return snap();
     },
+    list_programs: async () => ({
+      dir: "C:\\kiosk_launcher\\programs", found: true, error: null,
+      categories: [
+        { title: "WELLNESS - Elements", programs: [
+          { id: "air", title: "Air", artist: "Debrie - Zeller", duration: 600, artwork: "" },
+          { id: "water", title: "Water", artist: "Debrie - Zeller", duration: 600, artwork: "" },
+        ] },
+        { title: "MASSAGE - De-Stress", programs: [
+          { id: "siesta", title: "Siesta", artist: "AURASENS", duration: 616, artwork: "" },
+        ] },
+      ],
+    }),
+    select_program: async (id) => {
+      const names = { air: ["Air", "Debrie - Zeller", 600], water: ["Water", "Debrie - Zeller", 600], siesta: ["Siesta", "AURASENS", 616] };
+      const n = names[id];
+      if (state.playing && state.live_mode === "demo" && (state.program || {}).id !== id) { state.playing = false; state.live_mode = null; }
+      state.program = n ? { id, title: n[0], artist: n[1], duration: n[2] } : { id: "demo", title: "Demo", artist: "MUVI test track", duration: 30 };
+      return snap();
+    },
     toggle_demo_play: async () => {
       const on = !(state.playing && state.live_mode === "demo");
       state.playing = on;
       state.live_mode = on ? "demo" : null;
       if (on) {
+        const p = state.program || { title: "Demo", artist: "MUVI test track", duration: 30 };
         state.track = {
-          title: "Demo", artist: "MUVI test track", album: "",
-          duration: 30, artwork: "assets/artwork.svg",
+          title: p.title, artist: p.artist, album: "",
+          duration: p.duration || 30, artwork: "assets/artwork.svg",
         };
         state.position = 0;
         state.media = { ok: true, can_seek: true, can_prev: true, can_next: true, via: "demo" };
@@ -724,6 +744,8 @@ function setNav(nav) {
       Promise.resolve(api.lock_advanced()).then(render).catch(() => {});
     }
     if (api.set_active_page) Promise.resolve(api.set_active_page(nav)).then(render).catch(() => {});
+    // Programs copied onto the tablet appear without a restart.
+    if (nav === "programs" && subView.programs === "programs") buildPrograms();
   }
 }
 
@@ -738,30 +760,60 @@ function navigateToScreen(target) {
 }
 
 // ------------------------------------------------------------------ programs --
-// Programs page. Each program: square artwork, title below; tap opens its player.
-const PROGRAMS = [
-  { id: "demo", title: "Demo", artwork: "assets/program-demo.svg", screen: "demo" },
-];
+// Programs page. Demo first, then the Aurasens programs copied to the tablet
+// (main.py list_programs, grouped by category). Each card: square artwork, title and
+// artist · length below; tap opens the player for that program (Play starts it).
+const DEMO_PROGRAM = { id: "demo", title: "Demo", artist: "MUVI test track", duration: 0, artwork: "assets/program-demo.svg" };
 
-function buildPrograms() {
-  const grid = el("programGrid");
-  if (!grid || grid.dataset.built) return;
-  grid.dataset.built = "1";
-  PROGRAMS.forEach((p) => {
-    const li = document.createElement("li");
-    li.innerHTML = `
-      <button type="button" class="program-card" data-program="${p.id}">
-        <span class="program-art"><img src="${p.artwork}" alt="" /><span class="program-playing" hidden>Playing</span></span>
-        <span class="program-title">${p.title}</span>
-      </button>`;
-    li.querySelector("button").addEventListener("click", () => navigateToScreen(p.screen));
-    grid.appendChild(li);
+function escHtml(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function programCard(p) {
+  const li = document.createElement("li");
+  const art = p.artwork || "assets/program-demo.svg";
+  const sub = [p.artist, Number(p.duration) > 0 ? fmtTime(p.duration) : ""].filter(Boolean).join(" · ");
+  li.innerHTML = `
+    <button type="button" class="program-card" data-program="${escHtml(p.id)}">
+      <span class="program-art"><img src="${escHtml(art)}" alt="" /><span class="program-playing" hidden>Playing</span></span>
+      <span class="program-title">${escHtml(p.title)}</span>
+      ${sub ? `<span class="program-sub">${escHtml(sub)}</span>` : ""}
+    </button>`;
+  li.querySelector("button").addEventListener("click", async () => {
+    if (api.select_program) {
+      try { render(await api.select_program(p.id)); } catch (_) { /* keep the old selection */ }
+    }
+    navigateToScreen("demo");
   });
+  return li;
+}
+
+async function buildPrograms() {
+  const grid = el("programGrid");
+  if (!grid) return;
+  let cat = { categories: [] };
+  if (api.list_programs) {
+    try { cat = (await api.list_programs()) || cat; } catch (_) { /* Demo only */ }
+  }
+  grid.innerHTML = "";
+  grid.appendChild(programCard(DEMO_PROGRAM));
+  (cat.categories || []).forEach((c) => {
+    const head = document.createElement("li");
+    head.className = "program-category";
+    head.textContent = c.title || "";
+    grid.appendChild(head);
+    (c.programs || []).forEach((p) => grid.appendChild(programCard(p)));
+  });
+  if (lastState) renderPrograms(lastState);
 }
 
 function renderPrograms(s) {
   const demoOn = Boolean(s && s.playing && s.live_mode === "demo");
-  document.querySelectorAll('.program-card[data-program="demo"] .program-playing').forEach((b) => { b.hidden = !demoOn; });
+  const playingId = demoOn ? ((s.program && s.program.id) || "demo") : null;
+  document.querySelectorAll(".program-card").forEach((card) => {
+    const badge = card.querySelector(".program-playing");
+    if (badge) badge.hidden = card.dataset.program !== playingId;
+  });
 }
 
 function shortCaptureName(name) {
@@ -1215,11 +1267,14 @@ function render(s) {
 
   // Demo screen
   if (el("demoTitle")) {
+    const prog = s.program || { id: "demo", title: "Demo", artist: "MUVI test track" };
     const demoTrack = demoOn
       ? s.track
-      : { title: "Demo", artist: "MUVI test track", album: "", duration: s.track?.duration || 0, artwork: "assets/artwork.svg" };
+      : { title: prog.title, artist: prog.artist, album: "", duration: prog.duration || 0, artwork: "assets/artwork.svg" };
     el("demoTitle").textContent = demoTrack.title || "Demo";
-    el("demoArtist").textContent = demoTrack.artist || "MUVI test track";
+    el("demoArtist").textContent = demoTrack.artist || "";
+    const eyebrow = document.querySelector("#screen-demo .np-eyebrow");
+    if (eyebrow) eyebrow.textContent = prog.id === "demo" ? "Demo" : "Program";
     const demoAlbum = el("demoAlbum");
     if (demoAlbum) {
       demoAlbum.textContent = "";
@@ -1286,7 +1341,9 @@ function render(s) {
 
   if (demoOn) {
     statusClass = "live-demo";
-    statusTitle = "Demo playing";
+    statusTitle = s.program && s.program.id && s.program.id !== "demo"
+      ? `${s.program.title} playing`
+      : "Demo playing";
     statusSub = "Tap to open";
     statusIcon = statusIconDemo;
     navigateTarget = "demo";

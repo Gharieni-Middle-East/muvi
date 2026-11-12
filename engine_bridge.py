@@ -242,9 +242,13 @@ class EngineBridge:
         audio_muted: bool = False,
         vibration_muted: bool = False,
         silent: bool = False,
+        slot_map: list[int] | None = None,
+        title: str | None = None,
+        artist: str | None = None,
     ) -> dict[str, Any]:
         """Play assets/demo.wav through the same Gigaport vibration path.
-        silent=True plays silence instead (outputs open for the haptics calibration tone)."""
+        silent=True plays silence instead (outputs open for the haptics calibration tone).
+        path to an Aurasens program (.aif) plays its own vibration (slot_map = Gigaport 1-8)."""
         with self._lock:
             try:
                 self._kill_worker()
@@ -267,6 +271,12 @@ class EngineBridge:
                 }
                 if path:
                     msg["path"] = path
+                if slot_map:
+                    msg["slot_map"] = [int(s) for s in slot_map]
+                if title:
+                    msg["title"] = str(title)
+                if artist:
+                    msg["artist"] = str(artist)
                 result = self._send(msg, timeout=20.0)
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)

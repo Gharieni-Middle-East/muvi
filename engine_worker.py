@@ -128,6 +128,9 @@ def main() -> int:
                     roles_flipped=bool(msg.get("roles_flipped", False)),
                     loop=bool(msg.get("loop", True)),
                     silent=bool(msg.get("silent", False)),
+                    slot_map=msg.get("slot_map"),
+                    title=msg.get("title"),
+                    artist=msg.get("artist"),
                 )
                 set_audio_muted(bool(msg.get("audio_muted", False)))
                 print(

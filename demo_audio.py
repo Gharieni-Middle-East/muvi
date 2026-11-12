@@ -122,11 +122,17 @@ def start_demo_audio(
     roles_flipped: bool = False,
     loop: bool = True,
     silent: bool = False,
+    slot_map: list[int] | None = None,
+    title: str | None = None,
+    artist: str | None = None,
 ) -> dict[str, Any]:
     """Play demo.wav through LiveAudioEngine → Gigaport (same as Bluetooth Live).
 
     silent=True plays looping silence instead: opens the same outputs so the haptics
     calibration tone can run when nothing else is playing (no sound in the headphones).
+
+    path to an Aurasens program (24-bit AIFF with embedded haptics) plays its own vibration:
+    Gigaport output 1..8 <- the Aurasens slots in slot_map (default PROGRAM_SLOT_MAP).
     """
     if _engine is None or _gigaport is None:
         raise RuntimeError("Demo engine not bound — start via engine_worker")
@@ -137,6 +143,17 @@ def start_demo_audio(
         pcm = np.zeros((sr * 2, 2), dtype=np.float32)
         duration = 0.0
         title, artist = "Calibration", "Haptics calibration"
+    elif path and path.lower().endswith((".aif", ".aiff")):
+        from audio.aurasens_program import PROGRAM_SLOT_MAP, AurasensTrack
+
+        resolved = resolve_demo_path(path)
+        pcm = AurasensTrack(resolved, tuple(slot_map) if slot_map else PROGRAM_SLOT_MAP)
+        sr = pcm.sample_rate
+        duration = pcm.duration
+        vibration_mode = "haptics"
+        title = title or os.path.splitext(os.path.basename(resolved))[0]
+        artist = artist or ""
+        print(f"[demo_audio] Aurasens program, Gigaport 1-8 <- slots {list(pcm.slot_map)}", flush=True)
     else:
         resolved = resolve_demo_path(path)
         pcm, sr = load_wav_stereo(resolved)
@@ -210,6 +227,8 @@ def start_demo_audio(
             loop=loop,
         )
     except (PortAudioError, RuntimeError, OSError) as exc:
+        if hasattr(pcm, "close"):
+            pcm.close()
         raise RuntimeError(str(exc)) from exc
 
     return {

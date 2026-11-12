@@ -868,6 +868,9 @@ class LiveAudioEngine:
         self._vib_primed = False
         self._audio_primed = False
         self._ring_cap: int | None = None  # LIVE_RING_CAP for live capture, None for file feed
+        # Aurasens program: the file feed carries [audio L, R, vib out 1..8] and the vibration
+        # is the program's own (audio/aurasens_program.py), not the haptics DSP.
+        self._authored = False
         self._underruns = {"vib": 0, "audio": 0}
         self._underrun_log_at = 0.0
         self._streams_started_at: float | None = None
@@ -1056,6 +1059,7 @@ class LiveAudioEngine:
         capture: np.ndarray,
         *,
         already_processing_sr: bool = False,
+        authored: np.ndarray | None = None,
     ) -> np.ndarray:
         """Quake HapticDSP → 8 Gigaport channels, same chain as the Pi muvi-haptics app.
 
@@ -1063,6 +1067,9 @@ class LiveAudioEngine:
         overall level is inside the DSP before its limiter) × vibration slider / zone switches →
         soft clip → continuous resample to the output rate. Returns as many frames as it got
         (at the output rate), so it stays aligned with the audio path.
+
+        authored: (frames, 8) vibration already made for this block (an Aurasens program, at
+        the processing rate). It replaces the DSP; everything after the DSP still applies.
         """
         if not already_processing_sr:
             capture = self._stereo_capture_block(capture)
@@ -1072,22 +1079,27 @@ class LiveAudioEngine:
         if frames <= 0:
             return np.zeros((0, 8), dtype=np.float32)
 
-        dsp = self._ensure_haptic_dsp()
-        # Exact 512-sample DSP blocks via a FIFO (output FIFO is primed with one block, so it
-        # always holds enough: constant 11.6 ms latency, absorbed by the vibe sync delay).
-        self._haptic_in_fifo = np.concatenate([self._haptic_in_fifo, capture], axis=0)
-        n_full = len(self._haptic_in_fifo) // HAPTIC_BLOCK * HAPTIC_BLOCK
-        if n_full:
-            blocks = [
-                dsp.process(self._haptic_in_fifo[i:i + HAPTIC_BLOCK].T).T
-                for i in range(0, n_full, HAPTIC_BLOCK)
-            ]
-            self._haptic_out_fifo = np.concatenate([self._haptic_out_fifo, *blocks], axis=0)
-            self._haptic_in_fifo = self._haptic_in_fifo[n_full:]
-        vib = self._haptic_out_fifo[:frames]
-        self._haptic_out_fifo = self._haptic_out_fifo[frames:]
-        if len(vib) < frames:  # cannot happen with the primed FIFO; keep lengths aligned anyway
-            vib = np.concatenate([vib, np.zeros((frames - len(vib), 8), dtype=np.float32)], axis=0)
+        if authored is not None:
+            vib = np.zeros((frames, 8), dtype=np.float32)
+            n_a = min(frames, len(authored))
+            vib[:n_a, : min(8, authored.shape[1])] = authored[:n_a, :8]
+        else:
+            dsp = self._ensure_haptic_dsp()
+            # Exact 512-sample DSP blocks via a FIFO (output FIFO is primed with one block, so it
+            # always holds enough: constant 11.6 ms latency, absorbed by the vibe sync delay).
+            self._haptic_in_fifo = np.concatenate([self._haptic_in_fifo, capture], axis=0)
+            n_full = len(self._haptic_in_fifo) // HAPTIC_BLOCK * HAPTIC_BLOCK
+            if n_full:
+                blocks = [
+                    dsp.process(self._haptic_in_fifo[i:i + HAPTIC_BLOCK].T).T
+                    for i in range(0, n_full, HAPTIC_BLOCK)
+                ]
+                self._haptic_out_fifo = np.concatenate([self._haptic_out_fifo, *blocks], axis=0)
+                self._haptic_in_fifo = self._haptic_in_fifo[n_full:]
+            vib = self._haptic_out_fifo[:frames]
+            self._haptic_out_fifo = self._haptic_out_fifo[frames:]
+            if len(vib) < frames:  # cannot happen with the primed FIFO; keep lengths aligned anyway
+                vib = np.concatenate([vib, np.zeros((frames - len(vib), 8), dtype=np.float32)], axis=0)
 
         # Per-channel gain: calibration trim × on/off × vibration slider/zone switch (pairs:
         # head, upper, mid, legs). Ramped across the block so changes never click.
@@ -1238,6 +1250,13 @@ class LiveAudioEngine:
     def _stereo_capture_block(self, capture: np.ndarray) -> np.ndarray:
         if capture.ndim == 1:
             capture = capture.reshape(-1, 1)
+        if self._authored and capture.shape[1] == 10:
+            # Aurasens program: keep audio + 8 vibration channels together through the
+            # resampler and the delay line, so they stay sample-locked.
+            block = capture.astype(np.float32, copy=False)
+            if self.input_sample_rate != PROCESSING_SR:
+                block = self._rs("cap_in10", block, self.input_sample_rate, PROCESSING_SR)
+            return block
         if capture.shape[1] == 1:
             capture = np.repeat(capture, 2, axis=1)
         stereo = ensure_stereo(capture).astype(np.float32, copy=False)
@@ -1377,7 +1396,8 @@ class LiveAudioEngine:
         stereo = self._stereo_capture_block(capture)
         if len(stereo) == 0:
             return
-        mono = stereo.mean(axis=1)
+        authored = self._authored and stereo.shape[1] == 10
+        mono = stereo[:, :2].mean(axis=1)
         input_level = float(np.sqrt(np.mean(mono.astype(np.float32) ** 2) + 1e-10))
         # Audio L/R reflect what actually reaches the speakers: capture × volume.
         vol = self._effective_audio_gain()
@@ -1404,7 +1424,13 @@ class LiveAudioEngine:
         while (len(self._capture_ring) - self._capture_read_idx) - chunk_len >= delay:
             chunk = self._capture_ring[self._capture_read_idx : self._capture_read_idx + chunk_len]
             self._capture_read_idx += chunk_len
-            if self.vibration_mode == "haptics" or self._active_test_channel() is not None:
+            if authored:
+                # Aurasens program: its own 8 vibration channels, whatever the vibration mode.
+                vib8 = self._render_haptics_only(
+                    chunk[:, :2], already_processing_sr=True, authored=chunk[:, 2:10]
+                )
+                chunk = chunk[:, :2]
+            elif self.vibration_mode == "haptics" or self._active_test_channel() is not None:
                 vib8 = self._render_haptics_only(chunk, already_processing_sr=True)
             else:
                 vib8 = None
@@ -1850,14 +1876,21 @@ class LiveAudioEngine:
         synthetic_type_id: str = "sine",
         loop: bool = True,
     ) -> None:
-        """Play stereo PCM through the same vibration → Gigaport path as Live capture."""
-        pcm = np.asarray(pcm, dtype=np.float32)
-        if pcm.ndim == 1:
-            pcm = np.repeat(pcm.reshape(-1, 1), 2, axis=1)
-        elif pcm.shape[1] == 1:
-            pcm = np.repeat(pcm, 2, axis=1)
-        elif pcm.shape[1] > 2:
-            pcm = pcm[:, :2]
+        """Play stereo PCM through the same vibration → Gigaport path as Live capture.
+
+        pcm may also be an AurasensTrack (audio/aurasens_program.py): an array-like that
+        decodes [audio L, R, vib out 1..8] from disk block by block; its vibration goes to
+        the Gigaport as authored instead of through the haptics DSP.
+        """
+        authored = int(getattr(pcm, "authored_channels", 0) or 0) == 8
+        if not authored:
+            pcm = np.asarray(pcm, dtype=np.float32)
+            if pcm.ndim == 1:
+                pcm = np.repeat(pcm.reshape(-1, 1), 2, axis=1)
+            elif pcm.shape[1] == 1:
+                pcm = np.repeat(pcm, 2, axis=1)
+            elif pcm.shape[1] > 2:
+                pcm = pcm[:, :2]
         if len(pcm) == 0:
             raise RuntimeError("Demo audio is empty")
 
@@ -1890,6 +1923,7 @@ class LiveAudioEngine:
             self.output_sample_rate = _pick_output_sample_rate(output_device_index, vib_ch)
         self.input_sample_rate = int(sample_rate)
         self.capture_channels = 2
+        self._authored = authored
         self.processor = LiveStreamProcessor(
             sample_rate=PROCESSING_SR,
             segmentation_id=segmentation_id,
@@ -2092,8 +2126,15 @@ class LiveAudioEngine:
             setattr(self, stream_attr, None)
 
         with self._file_lock:
+            old_pcm = self._file_pcm
             self._file_pcm = None
             self._file_pos = 0
+        self._authored = False
+        if old_pcm is not None and hasattr(old_pcm, "close"):
+            try:
+                old_pcm.close()  # AurasensTrack: release the memory-mapped file
+            except Exception:  # noqa: BLE001
+                pass
 
         self._reset_capture_ring()
         with self.lock:

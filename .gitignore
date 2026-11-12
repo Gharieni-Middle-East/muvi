@@ -16,3 +16,6 @@ wifi_off_for_bluetooth.flag
 # saved user settings (volume, vibration, modes)
 muvi_settings.json
 muvi_settings.json.tmp
+
+# Aurasens programs copied for local testing (never commit: large, third-party content)
+programs/

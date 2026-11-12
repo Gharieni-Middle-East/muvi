@@ -6,6 +6,7 @@ Bluetooth Connect opens AudioPlaybackConnection (replaces APC).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -34,7 +35,7 @@ import webview
 import AppWatchdog
 import UpdateManager
 import device_name
-from audio import haptics_calibration
+from audio import aurasens_program, haptics_calibration
 from bt_audio import BluetoothAudioService
 from battery_manager import BatteryManager
 from engine_bridge import EngineBridge
@@ -100,6 +101,19 @@ def _launcher_file(name: str) -> str:
 def _wifi_flag_path() -> str:
     """Marker that the app switched Wi-Fi off, so a crash or restart can't leave the tablet offline."""
     return _launcher_file(WIFI_FLAG_NAME)
+
+
+def _image_data_url(path: str) -> str:
+    """Program artwork as a data: URL (it lives outside the web folder). '' if missing."""
+    mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+    kind = mime.get(os.path.splitext(path)[1].lower())
+    if not path or not kind or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "rb") as fh:
+            return f"data:{kind};base64,{base64.b64encode(fh.read()).decode('ascii')}"
+    except OSError:
+        return ""
 
 
 def _load_settings() -> dict[str, Any]:
@@ -270,6 +284,11 @@ class Api:
             "duration": 0.0,
             "artwork": "assets/artwork.svg",
         }
+        # Programs page: Demo + the Aurasens programs copied to the tablet (programs.json in
+        # aurasens_program.PROGRAMS_DIR). The card tapped last is the one Play starts.
+        self._programs: dict[str, dict[str, Any]] = {}
+        self._program_slot_map: list[int] = list(aurasens_program.PROGRAM_SLOT_MAP)
+        self.state["program"] = {"id": "demo", "title": "Demo", "artist": "MUVI test track", "duration": 0.0}
         self._live_started_at: float | None = None
         self._cal_started_engine = False  # calibration opened the outputs itself (silent)
         # Wi-Fi off while a phone uses Bluetooth (see WIFI_RESTORE_DELAY_S).
@@ -898,6 +917,7 @@ class Api:
         snap["vibration_muted"] = bool(self.state.get("vibration_muted"))
         snap["live_input"] = dict(self.state.get("live_input") or {})
         snap["demo"] = dict(self.state.get("demo") or {})
+        snap["program"] = dict(self.state.get("program") or {})
         snap["devices"] = [dict(d) for d in self._devices]
         snap["nearby_devices"] = [dict(d) for d in self._nearby]
         snap["hardware"] = dict(self._hardware_cache)
@@ -1102,6 +1122,24 @@ class Api:
                     self.state["play_busy"] = False
                     return self._snapshot()
 
+            with self._lock:
+                prog_id = (self.state.get("program") or {}).get("id") or "demo"
+                prog = self._programs.get(prog_id) if prog_id != "demo" else None
+                slot_map = list(self._program_slot_map)
+            if prog_id != "demo" and prog is None:
+                with self._lock:
+                    self.state["demo"]["error"] = "Program not found on this tablet"
+                    self.state["play_busy"] = False
+                    return self._snapshot()
+            extra: dict[str, Any] = {}
+            if prog is not None:
+                extra = {
+                    "path": prog["path"],
+                    "slot_map": slot_map,
+                    "title": prog["title"],
+                    "artist": prog["artist"],
+                }
+                print(f"[app] program {prog['title']!r}: Gigaport 1-8 <- Aurasens slots {slot_map}")
             result = self._engine.start_demo(
                 volume=self.state["volume"],
                 vibration=self.state["vibration"],
@@ -1113,6 +1151,7 @@ class Api:
                 zone_enabled=dict(self.state.get("zone_enabled") or {}),
                 audio_muted=bool(self.state.get("audio_muted")),
                 vibration_muted=bool(self.state.get("vibration_muted")),
+                **extra,
             )
             if result.get("ok"):
                 self._cal_started_engine = False
@@ -1130,10 +1169,8 @@ class Api:
                 self.state["demo"]["available"] = True
                 if ok:
                     self._live_started_at = time.monotonic()
-                    if result.get("title"):
-                        self._demo_track["title"] = result["title"]
-                    if result.get("artist"):
-                        self._demo_track["artist"] = result["artist"]
+                    self._demo_track["title"] = result.get("title") or "Demo"
+                    self._demo_track["artist"] = result.get("artist") or ""
                     if result.get("album"):
                         self._demo_track["album"] = result["album"]
                     if result.get("duration"):
@@ -1160,6 +1197,62 @@ class Api:
                 self.state["play_busy"] = False
                 self._live_started_at = None
                 return self._snapshot()
+
+    def list_programs(self) -> dict[str, Any]:
+        """Programs page: Demo plus the Aurasens programs found on this tablet.
+
+        Reads programs.json from aurasens_program.PROGRAMS_DIR every time the page is built,
+        so programs copied onto the tablet show up without a restart. Artwork comes back as
+        data: URLs (the files live outside the web folder)."""
+        cat = aurasens_program.load_catalogue()
+        programs: dict[str, dict[str, Any]] = {}
+        categories = []
+        for c in cat["categories"]:
+            items = []
+            for p in c["programs"]:
+                programs[p["id"]] = p
+                items.append({
+                    "id": p["id"],
+                    "title": p["title"],
+                    "artist": p["artist"],
+                    "duration": p["duration"],
+                    "artwork": _image_data_url(p.get("artwork_path") or ""),
+                })
+            categories.append({"title": c["title"], "programs": items})
+        with self._lock:
+            self._programs = programs
+            self._program_slot_map = [int(s) for s in cat["slot_map"]]
+        if cat.get("error"):
+            print(f"[app] programs: {cat['error']}")
+        print(f"[app] programs: {len(programs)} in {cat['dir']} (slots {cat['slot_map']})")
+        return {
+            "dir": cat["dir"],
+            "found": bool(cat["found"]),
+            "error": cat.get("error"),
+            "categories": categories,
+        }
+
+    def select_program(self, program_id: str) -> dict[str, Any]:
+        """Tap on a program card: its player opens; Play starts this program.
+        Selecting another program stops the one that is playing."""
+        pid = str(program_id or "demo")
+        with self._lock:
+            prog = self._programs.get(pid)
+            if pid != "demo" and prog is None:
+                pid = "demo"
+            old = (self.state.get("program") or {}).get("id")
+            playing_demo = bool(self.state.get("playing")) and self.state.get("live_mode") == "demo"
+            if pid == "demo":
+                self.state["program"] = {"id": "demo", "title": "Demo", "artist": "MUVI test track", "duration": 0.0}
+            else:
+                self.state["program"] = {
+                    "id": pid, "title": prog["title"], "artist": prog["artist"], "duration": prog["duration"],
+                }
+            self.state["demo"]["error"] = None
+        if playing_demo and old != pid:
+            self.stop_live()
+        with self._lock:
+            return self._snapshot()
 
     def toggle_demo_play(self) -> dict[str, Any]:
         """Demo tab Play = start/stop demo.wav."""
