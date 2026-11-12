@@ -28,7 +28,8 @@ AUDIO_GIGAPORT_OFFSET = 8
 MIN_DUAL_CHANNELS = DUAL_GIGAPORT_CHANNELS
 
 OutputLayout = Literal["single", "dual_asio4all", "dual_native", "vibration_only"]
-SpeakerRoute = Literal["headphones", "secondary"]
+# Audio Gigaport: "headphones" = CH1-2, "secondary" = speakers CH3-4, "both" = CH1-4.
+SpeakerRoute = Literal["headphones", "secondary", "both"]
 # "zones"   = one body zone per stereo pair (ch1-2 head, 3-4 upper, 5-6 mid, 7-8 legs).
 # "stereo"  = left channel to all left shakers (odd ch), right to all right shakers (even ch).
 # "haptics" = Quake HapticDSP → 8ch direct (bypasses build_vibration_only_block).
@@ -115,10 +116,10 @@ def build_output_block_haptics8(
         return out
     out[:, 0:8] = np.clip(vib8[:n, :8], -1.0, 1.0)
     audio = np.clip(audio[:n], -1.0, 1.0).astype(np.float32, copy=False)
-    if speaker_route == "secondary":
-        out[:, 10:12] = audio
-    else:
+    if speaker_route in ("headphones", "both"):
         out[:, 8:10] = audio
+    if speaker_route in ("secondary", "both"):
+        out[:, 10:12] = audio
     return out
 
 
@@ -153,10 +154,10 @@ def build_output_block(
         out[:, 5] = mid
         out[:, 6] = legs
         out[:, 7] = legs
-        if speaker_route == "secondary":
-            out[:, 10:12] = audio
-        else:
+        if speaker_route in ("headphones", "both"):
             out[:, 8:10] = audio
+        if speaker_route in ("secondary", "both"):
+            out[:, 10:12] = audio
         return out
 
     out = np.zeros((n, SATORI_OUTPUT_CHANNELS), dtype=np.float32)

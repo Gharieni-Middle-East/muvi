@@ -127,7 +127,7 @@ def _load_settings() -> dict[str, Any]:
     _num("cutoff_hz", 40.0, 250.0)
     if raw.get("vibration_mode") in ("haptics", "zones", "stereo"):
         out["vibration_mode"] = raw["vibration_mode"]
-    if raw.get("speaker_route") in ("headphones", "secondary"):
+    if raw.get("speaker_route") in ("headphones", "secondary", "both"):
         out["speaker_route"] = raw["speaker_route"]
     zones = raw.get("zone_enabled")
     if isinstance(zones, dict):
@@ -201,7 +201,9 @@ class Api:
                 "capture_name": None,
                 "message": "Connect AUX or Bluetooth to start.",
             },
-            "speaker_route": "headphones",  # 'headphones' | 'secondary' (dual Gigaport)
+            # Music on the 2nd Gigaport: 'headphones' = CH1-2, 'secondary' = speakers CH3-4,
+            # 'both' = CH1-4.
+            "speaker_route": "headphones",
             "vibration_mode": "haptics",  # 'haptics' | 'zones' | 'stereo'
             "output_layout": None,  # 'single' | 'dual_native'
             "audio_output_channels": 0,  # channels on the audio (sound) device
@@ -301,6 +303,8 @@ class Api:
             "codec_connected": False,
             "codec_name": None,
             "headphones_kind": None,
+            "aux_connected": False,
+            "aux_name": None,
             "roles_flipped": False,
             "can_swap_gigaports": False,
             "battery_percent": None,
@@ -379,6 +383,8 @@ class Api:
             "codec_connected": bool(hw.get("codec_connected")),
             "codec_name": hw.get("codec_name"),
             "headphones_kind": hw.get("headphones_kind"),
+            "aux_connected": bool(hw.get("aux_connected")),
+            "aux_name": hw.get("aux_name"),
             "roles_flipped": bool(hw.get("roles_flipped") or self.state.get("gigaport_roles_flipped")),
             "can_swap_gigaports": bool(hw.get("can_swap_gigaports")),
             "battery_percent": percent,
@@ -1253,7 +1259,7 @@ class Api:
     def set_speaker_route(self, route: str) -> dict[str, Any]:
         """Switch audio output between Gigaport 2 ch 1-2 (headphones) and ch 3-4 (speaker)."""
         route = str(route).strip().lower()
-        if route not in ("headphones", "secondary"):
+        if route not in ("headphones", "secondary", "both"):
             route = "headphones"
         with self._lock:
             self.state["speaker_route"] = route

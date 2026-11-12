@@ -486,7 +486,7 @@ svg { display: block; }
   border-radius: var(--radius);
   overflow: hidden;
 }
-.speaker-route-row { grid-template-columns: 1fr 1fr; }
+.speaker-route-row { grid-template-columns: 1fr 1fr 1fr; }
 .vib-mode-row { grid-template-columns: 1fr 1fr 1fr; }
 .speaker-route-row.hidden, .vib-mode-row.hidden { display: none; }
 .route-icon-btn, .vib-mode-btn {

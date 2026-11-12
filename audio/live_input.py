@@ -895,7 +895,7 @@ class LiveAudioEngine:
             self.output_channel_count = output_channels_for_layout(layout)
 
     def set_speaker_route(self, route: SpeakerRoute) -> None:
-        if route not in ("headphones", "secondary"):
+        if route not in ("headphones", "secondary", "both"):
             raise ValueError(f"Unknown speaker route: {route}")
         self.speaker_route = route
 
@@ -1415,10 +1415,13 @@ class LiveAudioEngine:
                     # Audio Gigaport jack map (1-based): CH1&2 headphones, CH3&4 speakers.
                     # Must open >=4 (ideally 8) channels — a 4ch Windows Speakers
                     # stream remaps "back" onto physical CH5&6.
-                    if self.speaker_route == "secondary" and audio_ch >= 4:
-                        audio_out[:, 2:4] = np.clip(audio[:n], -1.0, 1.0)
-                    elif audio_ch >= 2:
-                        audio_out[:, 0:2] = np.clip(audio[:n], -1.0, 1.0)
+                    # "both" = headphones (CH1&2) and speakers (CH3&4) together.
+                    clipped = np.clip(audio[:n], -1.0, 1.0)
+                    route = self.speaker_route if audio_ch >= 4 else "headphones"
+                    if route in ("headphones", "both") and audio_ch >= 2:
+                        audio_out[:, 0:2] = clipped
+                    if route in ("secondary", "both"):
+                        audio_out[:, 2:4] = clipped
                     with self.lock:
                         self._append_capped_locked(self._audio_output_ring, audio_out)
             elif vib8 is not None and self.output_layout == "dual_asio4all":

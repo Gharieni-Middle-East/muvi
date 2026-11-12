@@ -156,6 +156,10 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9v6h4l5 5V4L9 9H5z" fill="currentColor" stroke="none"/><path d="M16.5 8.5a4.5 4.5 0 010 7"/><path d="M19 6a8 8 0 010 12"/></svg>
                     <span class="route-label">Speakers</span>
                   </button>
+                  <button type="button" class="route-icon-btn" id="routeBoth" data-route="both" title="Headphones and speakers" aria-label="Headphones and speakers">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a6 6 0 0112 0"/><path d="M3 13v1.5A1.5 1.5 0 004.5 16H5v-4H4a1 1 0 00-1 1z" fill="currentColor" stroke="none"/><path d="M15 13v1.5a1.5 1.5 0 01-1.5 1.5H13v-4h1a1 1 0 011 1z" fill="currentColor" stroke="none"/><path d="M18 9a4 4 0 010 6"/><path d="M20.5 7a7 7 0 010 10"/></svg>
+                    <span class="route-label">Both</span>
+                  </button>
                 </div>
               </div>
 
@@ -271,6 +275,10 @@
                   <button type="button" class="route-icon-btn" id="demoRouteSpeaker" data-route="secondary" title="Speakers" aria-label="Speakers">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9v6h4l5 5V4L9 9H5z" fill="currentColor" stroke="none"/><path d="M16.5 8.5a4.5 4.5 0 010 7"/><path d="M19 6a8 8 0 010 12"/></svg>
                     <span class="route-label">Speakers</span>
+                  </button>
+                  <button type="button" class="route-icon-btn" id="demoRouteBoth" data-route="both" title="Headphones and speakers" aria-label="Headphones and speakers">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a6 6 0 0112 0"/><path d="M3 13v1.5A1.5 1.5 0 004.5 16H5v-4H4a1 1 0 00-1 1z" fill="currentColor" stroke="none"/><path d="M15 13v1.5a1.5 1.5 0 01-1.5 1.5H13v-4h1a1 1 0 011 1z" fill="currentColor" stroke="none"/><path d="M18 9a4 4 0 010 6"/><path d="M20.5 7a7 7 0 010 10"/></svg>
+                    <span class="route-label">Both</span>
                   </button>
                 </div>
               </div>
@@ -468,10 +476,20 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0116 0"/><path d="M4 13.5v1.5A2.5 2.5 0 006.5 17H7v-6H5.5A1.5 1.5 0 004 11.5v2z" fill="currentColor" stroke="none"/><path d="M20 13.5v1.5A2.5 2.5 0 0117.5 17H17v-6h1.5A1.5 1.5 0 0120 11.5v2z" fill="currentColor" stroke="none"/></svg>
             </span>
             <div class="hw-detail-body">
-              <strong class="hw-detail-label">Headphones</strong>
+              <strong class="hw-detail-label" id="hwRowCodecLabel">Headphones</strong>
               <span class="hw-detail-device" id="hwRowCodecDevice">Not detected</span>
             </div>
             <span class="hw-detail-status bad" id="hwRowCodecStatus">Not connected</span>
+          </li>
+          <li class="hw-detail-row bad" id="hwRowAux" hidden>
+            <span class="hw-detail-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h6"/><circle cx="12" cy="12" r="2"/><path d="M14 12h3l3-3M17 12l3 3"/></svg>
+            </span>
+            <div class="hw-detail-body">
+              <strong class="hw-detail-label">AUX input</strong>
+              <span class="hw-detail-device" id="hwRowAuxDevice">Not detected</span>
+            </div>
+            <span class="hw-detail-status bad" id="hwRowAuxStatus">Not connected</span>
           </li>
         </ul>
         <div class="hw-swap-card" id="gigaportSwapCard" hidden>

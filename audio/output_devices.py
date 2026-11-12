@@ -810,11 +810,16 @@ def resolve_output_topology(
                 int(d.get("index", 0)),
             )
 
-        audio = sorted(codec_cands, key=_codec_rank)[0] if codec_cands else None
-        if audio is None and physical_count >= 2:
+        # Two Gigaports: the second one plays the music (CH1-2 headphones, CH3-4 speakers)
+        # and a USB codec such as the Behringer UFO202 is only the AUX input. With one
+        # Gigaport, a codec is the music output (older UFO202 setup).
+        audio = None
+        if physical_count >= 2:
             second = _second_gigaport_unit(units, vib_unit)
             if second is not None:
                 audio = second[1]
+        if audio is None and codec_cands:
+            audio = sorted(codec_cands, key=_codec_rank)[0]
 
     if (
         roles_flipped

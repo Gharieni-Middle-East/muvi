@@ -111,7 +111,8 @@ def probe_hardware_status(
 
     Green rules:
       - Gigaport green  → at least one physical Gigaport is enumerated
-      - Headphones green → USB codec present, OR a second physical Gigaport
+      - Headphones green → a second physical Gigaport, OR (one Gigaport) a USB codec
+      - AUX green        → a USB codec (Behringer UFO202) is present
     One Gigaport alone never lights headphones.
     """
     if force_refresh or _should_refresh_portaudio(playing):
@@ -133,14 +134,16 @@ def probe_hardware_status(
     headphones_name: str | None = None
     headphones_kind: str | None = None
 
-    if codec_name is not None:
-        headphones_name = codec_name
-        headphones_kind = "codec"
-    elif physical_count >= 2 and vib_key is not None:
+    # Second Gigaport first (headphones + speakers); a USB codec (Behringer UFO202) is then
+    # the AUX input. Only with one Gigaport does the codec play the music.
+    if physical_count >= 2 and vib_key is not None:
         second = _second_gigaport_unit(units, vib_key)
         if second is not None:
             headphones_name = _short_name(second[1]["name"])
             headphones_kind = "gigaport"
+    if headphones_name is None and codec_name is not None:
+        headphones_name = codec_name
+        headphones_kind = "codec"
 
     if roles_flipped and physical_count >= 2 and vib_key is not None:
         second = _second_gigaport_unit(units, vib_key)
@@ -160,4 +163,7 @@ def probe_hardware_status(
         "headphones_kind": headphones_kind,
         "roles_flipped": bool(roles_flipped),
         "can_swap_gigaports": physical_count >= 2 and headphones_kind == "gigaport",
+        # AUX line-in interface (phone on a 3.5 mm cable), e.g. Behringer UFO202.
+        "aux_connected": codec_name is not None,
+        "aux_name": codec_name,
     }

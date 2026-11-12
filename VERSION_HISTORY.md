@@ -30,3 +30,4 @@
 - Settings: Bluetooth name - rename the tablet to "MuVi" (what phones show) with the administrator password, then restart
 - Volume, Vibration and Bass depth sliders move in 2 % steps, so a preferred level is easy to set again
 - Settings: Wi-Fi moved into Settings; haptics calibration moved to Advanced settings, which needs the service password
+- two Gigaports again: Gigaport 2 plays the music (CH1-2 headphones, CH3-4 speakers), choose Headphones / Speakers / Both on Now Playing; the Behringer UFO202 is only the AUX input (Settings shows it as "AUX input")

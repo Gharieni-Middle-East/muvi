@@ -145,7 +145,7 @@ const MockApi = (() => {
     },
     set_highpass_hz: async (v) => { state.highpass_hz = v; state.cutoff_hz = v; return snap(); },
     set_speaker_route: async (route) => {
-      state.speaker_route = route === "secondary" ? "secondary" : "headphones";
+      state.speaker_route = ["secondary", "both"].includes(route) ? route : "headphones";
       return snap();
     },
     set_vibration_mode: async (mode) => {
@@ -746,7 +746,7 @@ function renderSettingsStatus(hw, state) {
   if (!el("hwRowGigaport")) return;
   const flipped = Boolean(hw?.roles_flipped || state?.gigaport_roles_flipped);
   const canSwap = Boolean(hw?.can_swap_gigaports) || Number(hw?.gigaport_count || 0) >= 2;
-  const sig = JSON.stringify({ hw, playing: Boolean(state?.playing), flipped, canSwap });
+  const sig = JSON.stringify({ hw, playing: Boolean(state?.playing), mode: state?.live_mode, flipped, canSwap });
   if (sig === lastSettingsSig) return;
   lastSettingsSig = sig;
 
@@ -763,6 +763,19 @@ function renderSettingsStatus(hw, state) {
 
   setHwDetailRow("hwRowGigaport", gOk, gName, playing && gOk);
   setHwDetailRow("hwRowCodec", cOk, cName, playing && cOk);
+  // Second Gigaport plays headphones (CH1&2) and speakers (CH3&4); the UFO202 is the AUX input.
+  const codecLabel = el("hwRowCodecLabel");
+  if (codecLabel) {
+    codecLabel.textContent = hw?.headphones_kind === "gigaport" ? "Headphones and speakers" : "Headphones";
+  }
+  const auxRow = el("hwRowAux");
+  const auxShown = hw?.headphones_kind === "gigaport" || Boolean(hw?.aux_connected);
+  if (auxRow) auxRow.hidden = !auxShown;
+  if (auxShown) {
+    const auxOk = Boolean(hw?.aux_connected);
+    setHwDetailRow("hwRowAux", auxOk, formatHwDeviceName(hw?.aux_name, "USB Audio CODEC"),
+      auxOk && state?.live_mode === "aux" && playing);
+  }
 
   const swapCard = el("gigaportSwapCard");
   if (swapCard) swapCard.hidden = !canSwap;
@@ -1070,16 +1083,18 @@ function render(s) {
   // Headphones = CH1&2, Speakers = CH3&4 on the audio Gigaport (needs >=4 ch;
   // ideally 8 so Windows does not remap Speakers onto CH5&6).
   const routeCapable = dualOut && audioCh >= 4;
-  const route = s.speaker_route === "secondary" ? "secondary" : "headphones";
+  // Headphones = CH1&2, Speakers = CH3&4, Both = CH1-4 on the audio Gigaport.
+  const route = ["secondary", "both"].includes(s.speaker_route) ? s.speaker_route : "headphones";
   [
-    ["speakerRouteCard", "routeHeadphones", "routeSpeaker"],
-    ["demoSpeakerRouteCard", "demoRouteHeadphones", "demoRouteSpeaker"],
-  ].forEach(([cardId, hpId, spkId]) => {
+    ["speakerRouteCard", "routeHeadphones", "routeSpeaker", "routeBoth"],
+    ["demoSpeakerRouteCard", "demoRouteHeadphones", "demoRouteSpeaker", "demoRouteBoth"],
+  ].forEach(([cardId, hpId, spkId, bothId]) => {
     const routeCard = el(cardId);
     if (!routeCard) return;
     routeCard.classList.toggle("hidden", !routeCapable);
     el(hpId)?.classList.toggle("active", route === "headphones");
     el(spkId)?.classList.toggle("active", route === "secondary");
+    el(bothId)?.classList.toggle("active", route === "both");
   });
 
   // Vibration routing: "zones" | "stereo" | "haptics".

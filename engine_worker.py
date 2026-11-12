@@ -187,7 +187,7 @@ def main() -> int:
 
             elif cmd == "set_speaker_route":
                 route = str(msg.get("route", "headphones"))
-                if route not in ("headphones", "secondary"):
+                if route not in ("headphones", "secondary", "both"):
                     _reply({"ok": False, "error": f"bad speaker route: {route}"})
                 else:
                     set_speaker_route(route)  # type: ignore[arg-type]
