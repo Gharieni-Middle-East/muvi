@@ -85,7 +85,7 @@ def _snap(value: float) -> float:
     return round(round(max(0.0, min(1.0, float(value))) / SLIDER_STEP) * SLIDER_STEP, 4)
 _SETTINGS_KEYS = (
     "volume", "vibration", "cutoff_hz", "vibration_mode", "speaker_route",
-    "zone_enabled", "gigaport_roles_flipped",
+    "zone_enabled", "gigaport_roles_flipped", "haptic_dynamics", "haptic_layout",
 )
 
 
@@ -134,6 +134,10 @@ def _load_settings() -> dict[str, Any]:
         out["zone_enabled"] = {
             z: bool(zones.get(z, True)) for z in ("head", "upper", "mid", "legs")
         }
+    if raw.get("haptic_dynamics") in ("muvi", "quake"):
+        out["haptic_dynamics"] = raw["haptic_dynamics"]
+    if raw.get("haptic_layout") in ("zones", "aurasens"):
+        out["haptic_layout"] = raw["haptic_layout"]
     if isinstance(raw.get("gigaport_roles_flipped"), bool):
         out["gigaport_roles_flipped"] = raw["gigaport_roles_flipped"]
     return out
@@ -225,6 +229,9 @@ class Api:
             # Edits apply live; only Save writes them to disk.
             "haptic_cal": haptics_calibration.load(),
             "haptic_cal_dirty": False,
+            # Advanced settings -> haptics character (Aurasens comparison).
+            "haptic_dynamics": "muvi",   # 'muvi' | 'quake' (Aurasens original)
+            "haptic_layout": "zones",    # 'zones' (body zones) | 'aurasens' (Aurasens order)
             "haptic_cal_error": None,
             "live_paused": False,  # Live paused on the tablet (audio + vibration silent)
             # Page open in the UI. Each page owns its source: 'aux' plays only the UFO202
@@ -1394,7 +1401,28 @@ class Api:
     def _push_haptic_cal(self) -> None:
         with self._lock:
             cal = haptics_calibration.normalize(self.state["haptic_cal"])
+            dynamics = self.state.get("haptic_dynamics", "muvi")
+            layout = self.state.get("haptic_layout", "zones")
         self._engine.set_haptic_calibration(cal)
+        self._engine.set_haptic_style(dynamics, layout)
+
+    def set_haptic_style(self, dynamics: str | None = None, layout: str | None = None) -> dict[str, Any]:
+        """Advanced settings: 'muvi' / 'quake' dynamics and 'zones' / 'aurasens' layout.
+        Saved with the other settings; applies to the music right away."""
+        if not self._advanced_ok():
+            with self._lock:
+                return self._snapshot()
+        with self._lock:
+            if dynamics in ("muvi", "quake"):
+                self.state["haptic_dynamics"] = dynamics
+            if layout in ("zones", "aurasens"):
+                self.state["haptic_layout"] = layout
+            self._settings_changed()
+            d, l = self.state["haptic_dynamics"], self.state["haptic_layout"]
+        print(f"[app] haptics style: dynamics={d} layout={l}")
+        self._engine.set_haptic_style(d, l)
+        with self._lock:
+            return self._snapshot()
 
     def set_haptic_master(self, gain_db: float) -> dict[str, Any]:
         """Overall haptic level in dB (applied in the DSP before its limiter)."""

@@ -841,6 +841,20 @@ svg { display: block; }
 .hw-detail-status.ok, .hw-detail-status.live { color: var(--ok); }
 .hw-detail-status.bad { color: var(--bad); }
 
+/* Advanced settings -> Haptics character */
+.style-card { align-items: flex-start; }
+.style-row { display: flex; align-items: center; gap: 18px; margin-top: 14px; flex-wrap: wrap; }
+.style-label { width: 88px; font-size: 11px; font-weight: 500; letter-spacing: 0.2em; text-transform: uppercase; color: var(--text-dim); }
+.seg-row { display: inline-grid; grid-auto-flow: column; border: 1px solid var(--line-strong); border-radius: var(--radius); overflow: hidden; }
+.seg-btn {
+  min-height: 42px; padding: 0 18px;
+  border: none; background: transparent; color: var(--text-faint);
+  font-size: 11px; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase;
+  cursor: pointer; transition: background 0.2s, color 0.2s;
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--line-strong); }
+.seg-btn.active { background: var(--accent-soft); color: var(--accent-light); }
+
 /* Settings rows that open a sub-screen or a locked section */
 .settings-link {
   display: flex; align-items: center; gap: 20px;

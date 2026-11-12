@@ -122,6 +122,11 @@ const MockApi = (() => {
       return snap();
     },
     lock_advanced: async () => { state.advanced_unlocked = false; return snap(); },
+    set_haptic_style: async (dyn, lay) => {
+      if (dyn) state.haptic_dynamics = dyn;
+      if (lay) state.haptic_layout = lay;
+      return snap();
+    },
     set_bluetooth_name: async () => { state.device_name = { ...state.device_name, next_name: "MuVi", restart_needed: true }; return snap(); },
     restart_tablet: async () => snap(),
     media_play_pause: async () => { state.live_paused = !state.live_paused; return snap(); },
@@ -933,6 +938,13 @@ document.addEventListener("input", (e) => {
 }, true);
 
 // Settings -> Wi-Fi row and Advanced settings (password-protected haptics calibration).
+function renderHapticStyle(s) {
+  document.querySelectorAll(".seg-btn[data-style]").forEach((b) => {
+    const cur = b.dataset.style === "dynamics" ? (s.haptic_dynamics || "muvi") : (s.haptic_layout || "zones");
+    b.classList.toggle("active", b.dataset.value === cur);
+  });
+}
+
 function renderSettingsLinks(s) {
   const sub = el("settingsWifiSub");
   const w = s.wifi;
@@ -1013,6 +1025,7 @@ function render(s) {
   renderPrograms(s);
   renderBtName(s);
   renderSettingsLinks(s);
+  renderHapticStyle(s);
   requestAnimationFrame(syncAllRanges);
   if (typeof renderCalibration === "function") renderCalibration(s);
   const liveOn = isLivePlaying(s);
@@ -1648,6 +1661,12 @@ function wire() {
     }
   });
   el("advCancelBtn")?.addEventListener("click", closeAdvancedDialog);
+  document.querySelectorAll(".seg-btn[data-style]").forEach((b) => b.addEventListener("click", async () => {
+    if (!api.set_haptic_style) return;
+    const dyn = b.dataset.style === "dynamics" ? b.dataset.value : null;
+    const lay = b.dataset.style === "layout" ? b.dataset.value : null;
+    render(await api.set_haptic_style(dyn, lay));
+  }));
   el("advForm")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const pw = el("advPassword").value;

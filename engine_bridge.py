@@ -446,6 +446,15 @@ class EngineBridge:
             except Exception:  # noqa: BLE001
                 pass
 
+    def set_haptic_style(self, dynamics: str, layout: str) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            try:
+                self._send({"cmd": "set_haptic_style", "dynamics": str(dynamics), "layout": str(layout)}, spawn=False)
+            except Exception:  # noqa: BLE001
+                pass
+
     def haptic_test(self, channel: int | None) -> None:
         """Calibration tone on channel 1-8 (None stops); re-send to keep it playing."""
         with self._lock:

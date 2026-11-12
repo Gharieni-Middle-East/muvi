@@ -444,6 +444,11 @@ def set_haptic_calibration(cal: dict[str, Any] | None) -> None:
     )
 
 
+def set_haptic_style(dynamics: str | None = None, layout: str | None = None) -> None:
+    """Advanced settings: haptics dynamics ('muvi' | 'quake') and layout ('zones' | 'aurasens')."""
+    _live_engine.set_haptic_style(dynamics, layout)
+
+
 def set_haptic_test(channel: int | None) -> None:
     """Calibration tone on Gigaport channel 1-8 (None stops). Re-send to keep it alive."""
     _live_engine.set_haptic_test_channel(None if channel is None else int(channel) - 1)

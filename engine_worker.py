@@ -39,6 +39,7 @@ from live_audio import (  # noqa: E402
     prepare_zone_intensities,
     set_cutoff_hz,
     set_haptic_calibration,
+    set_haptic_style,
     set_haptic_test,
     set_speaker_route,
     set_vibration_mode,
@@ -179,6 +180,10 @@ def main() -> int:
 
             elif cmd == "set_haptic_calibration":
                 set_haptic_calibration(msg.get("calibration") or {})
+                _reply({"ok": True})
+
+            elif cmd == "set_haptic_style":
+                set_haptic_style(msg.get("dynamics"), msg.get("layout"))
                 _reply({"ok": True})
 
             elif cmd == "haptic_test":

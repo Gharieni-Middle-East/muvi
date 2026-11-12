@@ -36,7 +36,13 @@ from audio.gigaport_routing import (
     output_channels_for_layout,
 )
 from audio import haptics_calibration
-from audio.haptics_dsp import HAPTIC_BLOCK, HapticDSP, default_channel_map, soft_clip
+from audio.haptics_dsp import (
+    HAPTIC_BLOCK,
+    HapticDSP,
+    channel_map_for,
+    default_channel_map,  # noqa: F401  (kept for older callers)
+    soft_clip,
+)
 from audio.output_devices import wasapi_output_extra
 from audio.vibration_presets import (
     SATORI_OUTPUT_CHANNELS,
@@ -819,6 +825,9 @@ class LiveAudioEngine:
         self.speaker_route: SpeakerRoute = "headphones"
         self.vibration_mode: VibrationMode = "haptics"
         self._haptic_dsp: HapticDSP | None = None
+        # Advanced settings -> haptics character: "muvi" | "quake", "zones" | "aurasens".
+        self.haptic_dynamics = "muvi"
+        self.haptic_layout = "zones"
         # Pi-style calibration (see audio/haptics_calibration.py); pushed by the UI process.
         cal = haptics_calibration.load()
         self.haptic_master_gain_db = float(cal["master_gain_db"])
@@ -947,7 +956,19 @@ class LiveAudioEngine:
             self.haptic_channel_enabled = [bool(e) for e in cal["channel_enabled"]]
         dsp = self._haptic_dsp
         if master_changed and dsp is not None:
-            dsp.set_mix(default_channel_map(8), self.haptic_master_gain_db)
+            dsp.set_mix(channel_map_for(self.haptic_layout, 8), self.haptic_master_gain_db)
+
+    def set_haptic_style(self, dynamics: str | None = None, layout: str | None = None) -> None:
+        """Advanced settings: haptics dynamics (muvi / Aurasens original) and transducer layout
+        (body zones / Aurasens order). Applies to the running DSP right away."""
+        if dynamics in ("muvi", "quake"):
+            self.haptic_dynamics = dynamics
+        if layout in ("zones", "aurasens"):
+            self.haptic_layout = layout
+        dsp = self._haptic_dsp
+        if dsp is not None:
+            dsp.set_dynamics(self.haptic_dynamics)
+            dsp.set_mix(channel_map_for(self.haptic_layout, 8), self.haptic_master_gain_db)
 
     def set_haptic_test_channel(self, channel: int | None) -> None:
         """Play the calibration tone on one channel (0-based), or None to stop. Calling it again
@@ -985,10 +1006,11 @@ class LiveAudioEngine:
             dsp = HapticDSP(
                 fs=PROCESSING_SR,
                 mode="smart",
-                channel_map=default_channel_map(8),
+                channel_map=channel_map_for(self.haptic_layout, 8),
                 master_gain_db=self.haptic_master_gain_db,
                 n_out=8,
                 block=HAPTIC_BLOCK,
+                dynamics=self.haptic_dynamics,
             )
             dsp.set_bass_tilt(self._haptic_bass_tilt())
             self._haptic_dsp = dsp

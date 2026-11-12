@@ -36,6 +36,23 @@ MIN_DECAY, MAX_DECAY = 0.997869, 1.002131  # level min/max tracker drift (from t
 TRACKER_STEP_S = 512 / 44100  # the tracker decays above are per 512-sample block at 44.1 kHz
 BASS_TILT_DB = 6.0  # max low-band lift / high-band cut from the Bass depth slider
 EPS = 1e-10
+# "Aurasens original" dynamics (Quake smart mode, AURASENS_AUDIO_SPEC.md 2.3): +15 dB into a
+# 50:1 compressor above -15 dB. Its smoothing coefficients 0.808 / 0.899 are per 16-sample block
+# at 1500 Hz = 10.67 ms, the same length as our 512-sample block at 48 kHz, i.e. time constants
+# of 50 ms and 100 ms. Its peak normalisation keeps every channel <= full scale per block,
+# crossfaded from the previous block (no slow release). We keep the -3 dBFS ceiling and the soft
+# clip as a safety net for the transducers.
+DYNAMICS = ("muvi", "quake")
+QUAKE_PRE_GAIN = 10 ** (15 / 20)
+QUAKE_THRESHOLD_DB = -15.0
+QUAKE_RATIO = 50.0
+QUAKE_ATTACK_S = 0.050
+QUAKE_RELEASE_S = 0.100
+# Transducer layouts for the 8 channels (odd = left, even = right):
+#   "zones"    head = high band, upper back = mid, mid back + legs = low   (muvi default)
+#   "aurasens" band order of Aurasens' own small-lounger Quake map (slot table 2 at 0x1009c3ec0:
+#              L-mid, R-mid, L-low, R-low, L-high, R-high), legs on the low band
+LAYOUTS = ("zones", "aurasens")
 # Block length the DSP is designed for (same as the Pi: 512 samples, ~11.6 ms at 44.1 kHz).
 # Callers should feed blocks of this size; time constants also follow the actual length, so a
 # shorter remainder block behaves correctly.
@@ -60,9 +77,11 @@ def soft_clip(x, ceiling):
 
 
 class HapticDSP:
-    def __init__(self, fs, mode="smart", channel_map=None, master_gain_db=0.0, n_out=8, block=512):
+    def __init__(self, fs, mode="smart", channel_map=None, master_gain_db=0.0, n_out=8, block=512,
+                 dynamics="muvi"):
         self.fs = fs
         self.mode = mode
+        self.dynamics = dynamics if dynamics in DYNAMICS else "muvi"
         self.n_out = n_out
         if mode == "smart":
             self.sos = [
@@ -88,12 +107,21 @@ class HapticDSP:
         if n == self._coef_n:
             return
         t = n / self.fs
-        self.c_att = np.exp(-t / COMP_ATTACK_S)
-        self.c_rel = np.exp(-t / COMP_RELEASE_S)
-        self.c_lim_rel = np.exp(-t / LIMIT_RELEASE_S)
+        quake = self.dynamics == "quake"
+        self.c_att = np.exp(-t / (QUAKE_ATTACK_S if quake else COMP_ATTACK_S))
+        self.c_rel = np.exp(-t / (QUAKE_RELEASE_S if quake else COMP_RELEASE_S))
+        # Quake: per-block peak normalisation, no slow release (the block ramp is the crossfade).
+        self.c_lim_rel = 0.0 if quake else np.exp(-t / LIMIT_RELEASE_S)
         steps = t / TRACKER_STEP_S
         self.min_decay, self.max_decay = MIN_DECAY ** steps, MAX_DECAY ** steps
         self._coef_n = n
+
+    def set_dynamics(self, dynamics):
+        """'muvi' (gentle, keeps the music's dynamics) or 'quake' (Aurasens original)."""
+        dynamics = dynamics if dynamics in DYNAMICS else "muvi"
+        if dynamics != self.dynamics:
+            self.dynamics = dynamics
+            self._coef_n = None  # recompute the time constants on the next block
 
     def set_bass_tilt(self, tilt):
         """tilt -1..1: +1 lifts the low band and cuts the high band by BASS_TILT_DB,
@@ -134,12 +162,14 @@ class HapticDSP:
             mono = 0.5 * (x[0] + x[1])
             b, self.zi[0] = signal.sosfilt(self.sos[0], mono, zi=self.zi[0])
             y = np.tile(b, (6, 1))
-        y = y * PRE_GAIN
+        quake = self.dynamics == "quake"
+        y = y * (QUAKE_PRE_GAIN if quake else PRE_GAIN)
 
-        # per-band compressor (4:1 above -20 dB), smoothed in dB with attack/release
+        # per-band compressor (muvi 4:1 above -20 dB, Quake 50:1 above -15 dB), smoothed in dB
         level = _db(np.sqrt(np.mean(y * y, axis=1)))
-        over = np.maximum(level - COMP_THRESHOLD_DB, 0.0)
-        target = -over * (1.0 - 1.0 / COMP_RATIO)
+        thr, ratio = (QUAKE_THRESHOLD_DB, QUAKE_RATIO) if quake else (COMP_THRESHOLD_DB, COMP_RATIO)
+        over = np.maximum(level - thr, 0.0)
+        target = -over * (1.0 - 1.0 / ratio)
         coef = np.where(target < self.gain_db, self.c_att, self.c_rel)
         self.gain_db = self.gain_db * coef + target * (1.0 - coef)
         gain = 10 ** (self.gain_db / 20)
@@ -180,6 +210,25 @@ class HapticDSP:
         self.lim = new
         out = soft_clip(out * lg, LIMIT_CEILING)  # catches the start of a block before the ramp lands
         return out.astype(np.float32)
+
+
+def channel_map_for(layout, n_out=8):
+    return aurasens_channel_map(n_out) if layout == "aurasens" else default_channel_map(n_out)
+
+
+def aurasens_channel_map(n_out=8):
+    """Aurasens band order (their 6-transducer Quake map): pairs mid, low, high, then legs low."""
+    m = [
+        [["L-mid", 0.0]],
+        [["R-mid", 0.0]],
+        [["L-low", 0.0]],
+        [["R-low", 0.0]],
+        [["L-high", 0.0]],
+        [["R-high", 0.0]],
+        [["L-low", 0.0]],
+        [["R-low", 0.0]],
+    ]
+    return m[:n_out]
 
 
 def default_channel_map(n_out=8):
